@@ -86,6 +86,10 @@ pub fn main() !void {
         try yc.export_manifest.run();
         return;
     }
+    if (std.mem.eql(u8, args[1], "--list-models")) {
+        try yc.list_models.run(allocator, args[2..]);
+        return;
+    }
 
     const cmd = parseCommand(args[1]) orelse {
         std.debug.print("Unknown command: {s}\n\n", .{args[1]});
