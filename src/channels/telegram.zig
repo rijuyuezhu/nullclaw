@@ -4,6 +4,7 @@ const root = @import("root.zig");
 const voice = @import("../voice.zig");
 const platform = @import("../platform.zig");
 const config_types = @import("../config_types.zig");
+const interaction_commands = @import("../interactions/commands.zig");
 const interaction_choices = @import("../interactions/choices.zig");
 const Atomic = @import("../portable_atomic.zig").Atomic;
 
@@ -11,31 +12,6 @@ const log = std.log.scoped(.telegram);
 const MEDIA_GROUP_FLUSH_SECS: u64 = 3;
 const TEMP_MEDIA_SWEEP_INTERVAL_POLLS: u32 = 20;
 const TEMP_MEDIA_TTL_SECS: i64 = 24 * 60 * 60;
-const TELEGRAM_BOT_COMMANDS_JSON =
-    \\{"commands":[
-    \\{"command":"start","description":"Start a conversation"},
-    \\{"command":"new","description":"Clear history, start fresh"},
-    \\{"command":"reset","description":"Alias for /new"},
-    \\{"command":"help","description":"Show available commands"},
-    \\{"command":"commands","description":"Alias for /help"},
-    \\{"command":"status","description":"Show model and stats"},
-    \\{"command":"whoami","description":"Show current session id"},
-    \\{"command":"model","description":"Switch model"},
-    \\{"command":"models","description":"Alias for /model"},
-    \\{"command":"think","description":"Set thinking level"},
-    \\{"command":"verbose","description":"Set verbose level"},
-    \\{"command":"reasoning","description":"Set reasoning output"},
-    \\{"command":"exec","description":"Set exec policy"},
-    \\{"command":"queue","description":"Set queue policy"},
-    \\{"command":"usage","description":"Set usage footer mode"},
-    \\{"command":"tts","description":"Set TTS mode"},
-    \\{"command":"memory","description":"Memory tools and diagnostics"},
-    \\{"command":"doctor","description":"Memory diagnostics quick check"},
-    \\{"command":"stop","description":"Stop active background task"},
-    \\{"command":"restart","description":"Restart current session"},
-    \\{"command":"compact","description":"Compact context now"}
-    \\]}
-;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Attachment Types
@@ -760,7 +736,14 @@ pub const TelegramChannel = struct {
         var url_buf: [512]u8 = undefined;
         const url = self.apiUrl(&url_buf, "setMyCommands") catch return;
 
-        const resp = root.http_util.curlPostWithProxy(self.allocator, url, TELEGRAM_BOT_COMMANDS_JSON, &.{}, self.proxy, "10") catch |err| {
+        const resp = root.http_util.curlPostWithProxy(
+            self.allocator,
+            url,
+            interaction_commands.TELEGRAM_BOT_COMMANDS_JSON,
+            &.{},
+            self.proxy,
+            "10",
+        ) catch |err| {
             log.warn("setMyCommands failed: {}", .{err});
             return;
         };
@@ -944,10 +927,7 @@ pub const TelegramChannel = struct {
         invalid_option,
     };
 
-    const ParsedCallbackData = struct {
-        token: []const u8,
-        option_id: []const u8,
-    };
+    const ParsedCallbackData = interaction_choices.ChoiceCallbackData;
 
     fn appendReplyTo(body: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, reply_to: ?i64) !void {
         if (reply_to) |rid| {
@@ -1020,9 +1000,13 @@ pub const TelegramChannel = struct {
         for (directive.options, 0..) |opt, i| {
             if (i > 0) try out.appendSlice(self.allocator, ",");
 
-            var callback_data_buf: [128]u8 = undefined;
-            const callback_data = try std.fmt.bufPrint(&callback_data_buf, "nc1:{s}:{s}", .{ token, opt.id });
-            if (callback_data.len > 64) return error.CallbackDataTooLong;
+            const callback_data = try interaction_choices.buildChoiceCallbackData(
+                self.allocator,
+                token,
+                opt.id,
+                64,
+            );
+            defer self.allocator.free(callback_data);
 
             try out.appendSlice(self.allocator, "[{\"text\":");
             try root.json_util.appendJsonString(&out, self.allocator, opt.label);
@@ -1126,19 +1110,7 @@ pub const TelegramChannel = struct {
     }
 
     fn parseCallbackData(data: []const u8) ?ParsedCallbackData {
-        if (!std.mem.startsWith(u8, data, "nc1:")) return null;
-        const rest = data["nc1:".len..];
-        const sep = std.mem.indexOfScalar(u8, rest, ':') orelse return null;
-        if (sep == 0 or sep + 1 >= rest.len) return null;
-        const token = rest[0..sep];
-        const option_id = rest[sep + 1 ..];
-        if (token.len == 0) return null;
-        if (option_id.len == 0 or option_id.len > interaction_choices.MAX_ID_LEN) return null;
-        for (option_id) |c| {
-            const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '_' or c == '-';
-            if (!ok) return null;
-        }
-        return .{ .token = token, .option_id = option_id };
+        return interaction_choices.parseChoiceCallbackData(data);
     }
 
     fn consumeCallbackSelection(
@@ -4166,11 +4138,6 @@ test "telegram resolveAttachmentPath keeps absolute local path unchanged" {
 
     try std.testing.expect(resolved.owned == null);
     try std.testing.expectEqualStrings(input, resolved.path);
-}
-
-test "telegram bot command payload includes memory and doctor commands" {
-    try std.testing.expect(std.mem.indexOf(u8, TELEGRAM_BOT_COMMANDS_JSON, "\"command\":\"memory\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, TELEGRAM_BOT_COMMANDS_JSON, "\"command\":\"doctor\"") != null);
 }
 
 fn makeTestChoicesDirective(allocator: std.mem.Allocator) !interaction_choices.ChoicesDirective {

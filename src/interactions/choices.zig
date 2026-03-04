@@ -7,6 +7,12 @@ pub const MIN_OPTIONS: usize = 2;
 pub const MAX_ID_LEN: usize = 24;
 pub const MAX_LABEL_LEN: usize = 64;
 pub const MAX_SUBMIT_TEXT_LEN: usize = 256;
+pub const CALLBACK_PREFIX = "nc1:";
+
+pub const ChoiceCallbackData = struct {
+    token: []const u8,
+    option_id: []const u8,
+};
 
 pub const ChoiceOption = struct {
     id: []const u8,
@@ -80,6 +86,41 @@ pub fn parseAssistantChoices(allocator: std.mem.Allocator, text: []const u8) !Pa
     return .{
         .visible_text = visible,
         .choices = choices,
+    };
+}
+
+pub fn buildChoiceCallbackData(
+    allocator: std.mem.Allocator,
+    token: []const u8,
+    option_id: []const u8,
+    max_len: usize,
+) ![]u8 {
+    if (token.len == 0) return error.InvalidCallbackData;
+    if (!isValidChoiceId(option_id)) return error.InvalidCallbackData;
+
+    const encoded = try std.fmt.allocPrint(allocator, "{s}{s}:{s}", .{
+        CALLBACK_PREFIX,
+        token,
+        option_id,
+    });
+    errdefer allocator.free(encoded);
+
+    if (max_len > 0 and encoded.len > max_len) return error.CallbackDataTooLong;
+    return encoded;
+}
+
+pub fn parseChoiceCallbackData(data: []const u8) ?ChoiceCallbackData {
+    if (!std.mem.startsWith(u8, data, CALLBACK_PREFIX)) return null;
+    const rest = data[CALLBACK_PREFIX.len..];
+    const sep = std.mem.indexOfScalar(u8, rest, ':') orelse return null;
+    if (sep == 0 or sep + 1 >= rest.len) return null;
+    const token = rest[0..sep];
+    const option_id = rest[sep + 1 ..];
+    if (token.len == 0) return null;
+    if (!isValidChoiceId(option_id)) return null;
+    return .{
+        .token = token,
+        .option_id = option_id,
     };
 }
 
@@ -284,4 +325,28 @@ test "choices parse rejects invalid id chars" {
     );
     defer parsed.deinit(allocator);
     try std.testing.expect(parsed.choices == null);
+}
+
+test "choices callback data roundtrip" {
+    const allocator = std.testing.allocator;
+    const encoded = try buildChoiceCallbackData(allocator, "tok1", "yes", 64);
+    defer allocator.free(encoded);
+
+    try std.testing.expectEqualStrings("nc1:tok1:yes", encoded);
+
+    const parsed = parseChoiceCallbackData(encoded) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("tok1", parsed.token);
+    try std.testing.expectEqualStrings("yes", parsed.option_id);
+}
+
+test "choices callback data rejects long payload" {
+    const allocator = std.testing.allocator;
+    const long_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    try std.testing.expectError(error.CallbackDataTooLong, buildChoiceCallbackData(allocator, long_token, "yes", 64));
+}
+
+test "choices parse callback data rejects malformed payload" {
+    try std.testing.expect(parseChoiceCallbackData("nc1:tok") == null);
+    try std.testing.expect(parseChoiceCallbackData("bad:tok:yes") == null);
+    try std.testing.expect(parseChoiceCallbackData("nc1:tok:YES") == null);
 }
