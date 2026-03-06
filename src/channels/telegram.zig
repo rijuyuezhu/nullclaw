@@ -11,9 +11,10 @@ const Atomic = @import("../portable_atomic.zig").Atomic;
 const log = std.log.scoped(.telegram);
 const MEDIA_GROUP_FLUSH_SECS: u64 = 3;
 const TEXT_MESSAGE_DEBOUNCE_SECS: u64 = 3;
-// Telegram clients may split long messages well below the 4096 hard limit.
-// A lower threshold helps coalesce practical chunk sizes observed in the wild.
-const TEXT_SPLIT_LIKELY_MIN_LEN: usize = 800;
+// Telegram clients may split long messages below the 4096 hard limit.
+// Keep this threshold high enough to avoid delaying normal messages, while
+// still catching real split chunks observed around ~3.4k.
+const TEXT_SPLIT_LIKELY_MIN_LEN: usize = 2500;
 const TEMP_MEDIA_SWEEP_INTERVAL_POLLS: u32 = 20;
 const TEMP_MEDIA_TTL_SECS: i64 = 24 * 60 * 60;
 const DRAFT_FLUSH_MIN_DELTA_BYTES: usize = 64;
@@ -4284,7 +4285,7 @@ test "telegram shouldDebounceTextMessage catches real-world ~3.4k split chunk" {
     try std.testing.expect(shouldDebounceTextMessage(&ch, msg));
 }
 
-test "telegram shouldDebounceTextMessage catches medium split chunk (~900 bytes)" {
+test "telegram shouldDebounceTextMessage does not debounce medium non-split chunk (~900 bytes)" {
     const alloc = std.testing.allocator;
     var ch = TelegramChannel.init(alloc, "123:ABC", &.{"*"}, &.{}, "allowlist");
     defer {
@@ -4294,20 +4295,20 @@ test "telegram shouldDebounceTextMessage catches medium split chunk (~900 bytes)
     }
 
     const now = root.nowEpochSecs();
-    const split_like_content = try alloc.alloc(u8, 900);
-    defer alloc.free(split_like_content);
-    @memset(split_like_content, 'x');
+    const medium_content = try alloc.alloc(u8, 900);
+    defer alloc.free(medium_content);
+    @memset(medium_content, 'x');
 
     const msg: root.ChannelMessage = .{
         .id = "user-b",
         .sender = "chat-b",
-        .content = split_like_content,
+        .content = medium_content,
         .channel = "telegram",
         .timestamp = now,
         .message_id = 101,
     };
 
-    try std.testing.expect(shouldDebounceTextMessage(&ch, msg));
+    try std.testing.expect(!shouldDebounceTextMessage(&ch, msg));
 }
 
 test "telegram mergeConsecutiveMessages non-consecutive ids not merged" {
