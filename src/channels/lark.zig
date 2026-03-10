@@ -14,15 +14,15 @@ const invalid_socket: SocketFd = switch (builtin.os.tag) {
     .windows => std.os.windows.ws2_32.INVALID_SOCKET,
     else => -1,
 };
-const AtomicU64 = std.atomic.Value(u64);
-const DEFAULT_LARK_PING_INTERVAL_MS: u64 = 120 * std.time.ms_per_s;
+const AtomicU32 = std.atomic.Value(u32);
+const DEFAULT_LARK_PING_INTERVAL_MS: u32 = 120 * std.time.ms_per_s;
 const EVENT_CACHE_TTL_MS: i64 = 10_000;
 const LARK_WS_METHOD_CONTROL: i32 = 0;
 const LARK_WS_METHOD_DATA: i32 = 1;
 
 const LarkWsConnectConfig = struct {
     url: []u8,
-    ping_interval_ms: u64 = DEFAULT_LARK_PING_INTERVAL_MS,
+    ping_interval_ms: u32 = DEFAULT_LARK_PING_INTERVAL_MS,
 
     fn deinit(self: *LarkWsConnectConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.url);
@@ -67,7 +67,7 @@ const LarkWsEventBuffer = struct {
 const LarkWsPingLoopCtx = struct {
     ws: *websocket.WsClient,
     running: *const std.atomic.Value(bool),
-    ping_interval_ms: *AtomicU64,
+    ping_interval_ms: *AtomicU32,
     service_id: i32,
 };
 
@@ -480,7 +480,9 @@ pub const LarkChannel = struct {
                         .float => |v| if (v > 0) @as(u64, @intFromFloat(v)) else 0,
                         else => 0,
                     };
-                    if (ping_secs > 0) cfg.ping_interval_ms = ping_secs * std.time.ms_per_s;
+                    if (ping_secs > 0) {
+                        cfg.ping_interval_ms = std.math.cast(u32, ping_secs * std.time.ms_per_s) orelse return error.LarkApiError;
+                    }
                 }
             }
         }
@@ -662,7 +664,7 @@ pub const LarkChannel = struct {
         ws: *websocket.WsClient,
         payload: []const u8,
         event_buffers: *std.StringHashMapUnmanaged(LarkWsEventBuffer),
-        ping_interval_ms: *AtomicU64,
+        ping_interval_ms: *AtomicU32,
     ) !void {
         var frame = try decodeLarkWsFrame(self.allocator, payload);
         defer frame.deinit(self.allocator);
@@ -725,7 +727,7 @@ pub const LarkChannel = struct {
         var event_buffers: std.StringHashMapUnmanaged(LarkWsEventBuffer) = .empty;
         defer deinitLarkWsEventBuffers(self.allocator, &event_buffers);
 
-        var ping_interval_ms = AtomicU64.init(connect_cfg.ping_interval_ms);
+        var ping_interval_ms = AtomicU32.init(connect_cfg.ping_interval_ms);
         var ping_thread: ?std.Thread = null;
         var ping_ctx: LarkWsPingLoopCtx = undefined;
         if (connect_parts.service_id) |service_id| {
@@ -1228,7 +1230,7 @@ fn buildLarkWsEventAckFrame(buf: []u8, frame: LarkWsFrame, biz_rt_ms: u64) ![]co
     return fbs.getWritten();
 }
 
-fn updatePingIntervalFromControlPayload(ping_interval_ms: *AtomicU64, payload: []const u8) void {
+fn updatePingIntervalFromControlPayload(ping_interval_ms: *AtomicU32, payload: []const u8) void {
     const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return;
     defer parsed.deinit();
     if (parsed.value != .object) return;
@@ -1238,7 +1240,8 @@ fn updatePingIntervalFromControlPayload(ping_interval_ms: *AtomicU64, payload: [
         .float => |v| if (v > 0) @as(u64, @intFromFloat(v)) else return,
         else => return,
     };
-    ping_interval_ms.store(ping_secs * std.time.ms_per_s, .release);
+    const ping_interval_ms_value = std.math.cast(u32, ping_secs * std.time.ms_per_s) orelse return;
+    ping_interval_ms.store(ping_interval_ms_value, .release);
 }
 
 fn cleanupExpiredLarkWsEventBuffers(
@@ -1371,10 +1374,10 @@ fn larkWsPingLoop(ctx: *LarkWsPingLoopCtx) void {
             break :blk if (current > 0) current else DEFAULT_LARK_PING_INTERVAL_MS;
         };
 
-        var waited_ms: u64 = 0;
+        var waited_ms: u32 = 0;
         while (waited_ms < interval_ms and ctx.running.load(.acquire)) {
-            const step_ms: u64 = @min(interval_ms - waited_ms, @as(u64, 1000));
-            std.Thread.sleep(step_ms * std.time.ns_per_ms);
+            const step_ms: u32 = @min(interval_ms - waited_ms, @as(u32, 1000));
+            std.Thread.sleep(@as(u64, step_ms) * std.time.ns_per_ms);
             waited_ms += step_ms;
         }
         if (!ctx.running.load(.acquire)) break;
@@ -1918,7 +1921,7 @@ test "lark extractWebsocketConnectConfig captures ping interval" {
     var cfg = try LarkChannel.extractWebsocketConnectConfig(allocator, resp);
     defer cfg.deinit(allocator);
     try std.testing.expectEqualStrings("wss://ws-client.feishu.cn/ws/?app_id=cli_xxx&device_id=dev1&service_id=7", cfg.url);
-    try std.testing.expectEqual(@as(u64, 45 * std.time.ms_per_s), cfg.ping_interval_ms);
+    try std.testing.expectEqual(@as(u32, 45 * std.time.ms_per_s), cfg.ping_interval_ms);
 }
 
 test "lark parseWebsocketConnectUrl extracts host port and path" {
