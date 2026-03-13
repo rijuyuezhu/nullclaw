@@ -332,11 +332,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     // Single message mode: nullclaw agent -m "hello"
     if (message_arg) |message| {
-        try w.print("Sending to {s}...\n", .{cfg.default_provider});
+        log.debug("Sending to {s}...", .{cfg.default_provider});
         if (session_id) |sid| {
-            try w.print("Session: {s}\n", .{sid});
+            log.debug("Session: {s}", .{sid});
         }
-        try w.flush();
 
         var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
         agent.policy = &policy;
