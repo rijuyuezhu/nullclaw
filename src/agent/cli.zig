@@ -332,9 +332,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     // Single message mode: nullclaw agent -m "hello"
     if (message_arg) |message| {
-        log.debug("Sending to {s}...", .{cfg.default_provider});
-        if (session_id) |sid| {
-            log.debug("Session: {s}", .{sid});
+        // Keep subprocess runs quiet by default; cron and other callers
+        // consume this mode programmatically and should only see the response.
+        if (verbose.isVerbose()) {
+            log.info("Sending to {s}...", .{cfg.default_provider});
+            if (session_id) |sid| {
+                log.info("Session: {s}", .{sid});
+            }
         }
 
         var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
