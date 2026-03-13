@@ -6,7 +6,7 @@
 //!   - Body size limits (64KB max)
 //!   - Request timeouts (30s)
 //!   - Bearer token authentication (PairingGuard)
-//!   - Endpoints: /health, /ready, /pair, /webhook, /whatsapp, /telegram, /line, /lark, /qq, /slack/events
+//!   - Endpoints: /health, /ready, /pair, /webhook, /whatsapp, /telegram, /line, /lark, /qq, /max, /slack/events
 //!
 //! Uses std.http.Server (built-in, no external deps).
 
@@ -1787,6 +1787,7 @@ const webhook_route_descriptors = [_]WebhookRouteDescriptor{
     .{ .path = "/line", .handler = handleLineWebhookRoute },
     .{ .path = "/lark", .handler = handleLarkWebhookRoute },
     .{ .path = "/qq", .handler = handleQqWebhookRoute },
+    .{ .path = "/max", .handler = handleMaxWebhookRoute },
 };
 
 fn findWebhookRouteDescriptor(path: []const u8) ?*const WebhookRouteDescriptor {
@@ -2638,13 +2639,135 @@ fn handleQqWebhookRoute(ctx: *WebhookHandlerContext) void {
     ctx.response_body = "{\"status\":\"ok\"}";
 }
 
+fn handleMaxWebhookRoute(ctx: *WebhookHandlerContext) void {
+    if (!build_options.enable_channel_max) {
+        ctx.response_status = "404 Not Found";
+        ctx.response_body = "{\"error\":\"max channel disabled in this build\"}";
+        return;
+    }
+
+    if (!std.mem.eql(u8, ctx.method, "POST")) {
+        ctx.response_status = "405 Method Not Allowed";
+        ctx.response_body = "{\"error\":\"method not allowed\"}";
+        return;
+    }
+    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "max")) {
+        ctx.response_status = "429 Too Many Requests";
+        ctx.response_body = "{\"error\":\"rate limited\"}";
+        return;
+    }
+
+    const body = extractBody(ctx.raw_request) orelse {
+        ctx.response_body = "{\"status\":\"received\"}";
+        return;
+    };
+
+    // Verify webhook secret if configured
+    var max_bot_token: []const u8 = "";
+    var max_allow_from: []const []const u8 = &.{};
+    var max_account_id: []const u8 = "default";
+    var max_webhook_secret: ?[]const u8 = null;
+
+    if (ctx.config_opt) |cfg| {
+        if (cfg.channels.maxPrimary()) |max_cfg| {
+            max_bot_token = max_cfg.bot_token;
+            max_allow_from = max_cfg.allow_from;
+            max_account_id = max_cfg.account_id;
+            max_webhook_secret = max_cfg.webhook_secret;
+        }
+    }
+
+    // Verify secret header if secret is configured
+    if (max_webhook_secret) |secret| {
+        if (secret.len > 0) {
+            const sig_header = extractHeader(ctx.raw_request, "X-Max-Bot-Api-Secret");
+            if (sig_header) |sig| {
+                if (!std.mem.eql(u8, std.mem.trim(u8, sig, " \t\r\n"), secret)) {
+                    ctx.response_status = "403 Forbidden";
+                    ctx.response_body = "{\"error\":\"invalid secret\"}";
+                    return;
+                }
+            } else {
+                ctx.response_status = "403 Forbidden";
+                ctx.response_body = "{\"error\":\"missing secret\"}";
+                return;
+            }
+        }
+    }
+
+    // Parse the update JSON
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.req_allocator, body, .{}) catch {
+        ctx.response_status = "400 Bad Request";
+        ctx.response_body = "{\"error\":\"invalid json payload\"}";
+        return;
+    };
+    defer parsed.deinit();
+
+    // Build a temporary MaxChannel to process the update (for authorization checks)
+    var max_ch = channels.max.MaxChannel{
+        .allocator = ctx.req_allocator,
+        .bot_token = max_bot_token,
+        .allow_from = max_allow_from,
+        .group_allow_from = &.{},
+        .group_policy = "allowlist",
+    };
+
+    if (max_ch.processUpdate(ctx.req_allocator, parsed.value)) |inbound| {
+        defer inbound.deinit(ctx.req_allocator);
+
+        const reply_target = inbound.reply_target orelse inbound.sender;
+        var kb: [128]u8 = undefined;
+        const sk = std.fmt.bufPrint(&kb, "max:{s}:{s}", .{ max_account_id, reply_target }) catch "max:default";
+        const peer_kind: []const u8 = if (inbound.is_group) "group" else "direct";
+
+        if (ctx.state.event_bus) |eb| {
+            var meta_buf: [384]u8 = undefined;
+            const meta = std.fmt.bufPrint(&meta_buf, "{{\"account_id\":\"{s}\",\"peer_kind\":\"{s}\",\"peer_id\":\"{s}\"}}", .{
+                max_account_id,
+                peer_kind,
+                reply_target,
+            }) catch null;
+            _ = publishToBus(eb, ctx.state.allocator, "max", inbound.sender, reply_target, inbound.content, sk, meta);
+            ctx.response_body = "{\"status\":\"received\"}";
+            return;
+        }
+
+        if (ctx.session_mgr_opt) |sm| {
+            const reply: ?[]const u8 = sm.processMessage(sk, inbound.content, null) catch |err| blk: {
+                var send_ch = channels.max.MaxChannel{
+                    .allocator = ctx.req_allocator,
+                    .bot_token = max_bot_token,
+                    .allow_from = max_allow_from,
+                    .group_allow_from = &.{},
+                    .group_policy = "allowlist",
+                };
+                send_ch.sendMessage(reply_target, userFacingAgentError(err)) catch {};
+                break :blk null;
+            };
+            if (reply) |r| {
+                defer ctx.root_allocator.free(r);
+                var send_ch = channels.max.MaxChannel{
+                    .allocator = ctx.req_allocator,
+                    .bot_token = max_bot_token,
+                    .allow_from = max_allow_from,
+                    .group_allow_from = &.{},
+                    .group_policy = "allowlist",
+                };
+                send_ch.sendMessage(reply_target, r) catch {};
+            }
+        }
+    }
+
+    ctx.response_body = "{\"status\":\"ok\"}";
+}
+
 fn applyRuntimeProviderOverrides(config: *const Config) !void {
     try http_util.setProxyOverride(config.http_request.proxy);
     try providers.setApiErrorLimitOverride(config.diagnostics.api_error_max_chars);
 }
 
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
-/// Endpoints: GET /health, GET /ready, POST /pair, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, POST /qq
+/// Endpoints: GET /health, GET /ready, POST /pair, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, POST /qq, POST /max
 /// If config_ptr is null, loads config internally (for backward compatibility).
 pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr: ?*const Config, event_bus: ?*bus_mod.Bus) !void {
     health.markComponentOk("gateway");
