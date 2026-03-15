@@ -7391,6 +7391,10 @@ test "Agent selectDisplayText hides orphan closing tool_call tag" {
     const raw = "Here are the results:\n</tool_call>\nSome reply";
     const selected = Agent.selectDisplayText(raw, "", 0);
     try std.testing.expectEqualStrings("", selected);
+
+    const bracket_raw = "Here are the results:\n[/tool_call]\nSome reply";
+    const bracket_selected = Agent.selectDisplayText(bracket_raw, "", 0);
+    try std.testing.expectEqualStrings("", bracket_selected);
 }
 
 test "Agent selectDisplayText keeps plain text when no markup exists" {

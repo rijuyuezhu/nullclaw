@@ -107,7 +107,9 @@ pub fn containsToolCallMarkup(text: []const u8) bool {
     return std.mem.indexOf(u8, text, "<tool_call>") != null or
         std.mem.indexOf(u8, text, "</tool_call>") != null or
         std.mem.indexOf(u8, text, "[TOOL_CALL]") != null or
-        std.mem.indexOf(u8, text, "[tool_call]") != null;
+        std.mem.indexOf(u8, text, "[tool_call]") != null or
+        std.mem.indexOf(u8, text, "[/TOOL_CALL]") != null or
+        std.mem.indexOf(u8, text, "[/tool_call]") != null;
 }
 
 /// Parse tool calls from an LLM response using XML-style `<tool_call>` tags.
@@ -2392,6 +2394,8 @@ test "containsToolCallMarkup detects orphan closing tag" {
     // Model sometimes emits </tool_call> without an opener; must be suppressed.
     try std.testing.expect(containsToolCallMarkup("Here are the results:\n</tool_call>\nSome reply"));
     try std.testing.expect(containsToolCallMarkup("</tool_call>"));
+    try std.testing.expect(containsToolCallMarkup("Here are the results:\n[/TOOL_CALL]\nSome reply"));
+    try std.testing.expect(containsToolCallMarkup("[/tool_call]"));
 }
 
 test "isNativeJsonFormat false for XML response" {
