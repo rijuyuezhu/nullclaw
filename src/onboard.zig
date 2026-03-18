@@ -114,6 +114,7 @@ pub const known_providers = [_]ProviderInfo{
     .{ .key = "perplexity", .label = "Perplexity", .default_model = "llama-4-sonar-small-128k-online", .env_var = "PERPLEXITY_API_KEY" },
 
     // --- Tier 6: Infrastructure providers ---
+    .{ .key = "novita", .label = "Novita AI (inference)", .default_model = "moonshotai/kimi-k2.5", .env_var = "NOVITA_API_KEY" },
     .{ .key = "nvidia", .label = "NVIDIA NIM (enterprise)", .default_model = "meta/llama-4-70b-instruct", .env_var = "NVIDIA_API_KEY" },
     .{ .key = "cloudflare", .label = "Cloudflare AI Gateway", .default_model = "meta/llama-4-70b-instruct", .env_var = "CLOUDFLARE_API_TOKEN" },
     .{ .key = "vercel-ai", .label = "Vercel AI Gateway", .default_model = "gpt-5.2", .env_var = "VERCEL_API_KEY" },

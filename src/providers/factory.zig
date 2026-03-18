@@ -154,6 +154,7 @@ const compat_providers = [_]CompatProvider{
     .{ .name = "build.nvidia.com", .url = "https://integrate.api.nvidia.com/v1", .display = "NVIDIA NIM" },
     .{ .name = "ovhcloud", .url = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", .display = "OVHcloud" },
     .{ .name = "ovh", .url = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", .display = "OVHcloud" },
+    .{ .name = "novita", .url = "https://api.novita.ai/openai", .display = "Novita" },
 
     // ── Local Servers ─────────────────────────────────────────────────────
     .{ .name = "lmstudio", .url = "http://localhost:1234/v1", .display = "LM Studio" },
@@ -508,6 +509,7 @@ test "compatibleProviderUrl new providers" {
     try std.testing.expectEqualStrings("https://api.siliconflow.cn/v1", compatibleProviderUrl("siliconflow").?);
     try std.testing.expectEqualStrings("https://router.shengsuanyun.com/api/v1", compatibleProviderUrl("shengsuanyun").?);
     try std.testing.expectEqualStrings("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", compatibleProviderUrl("ovhcloud").?);
+    try std.testing.expectEqualStrings("https://api.novita.ai/openai", compatibleProviderUrl("novita").?);
     try std.testing.expectEqualStrings("https://ark.ap-southeast.bytepluses.com/api/v3", compatibleProviderUrl("byteplus").?);
     try std.testing.expectEqualStrings("https://chutes.ai/api/v1", compatibleProviderUrl("chutes").?);
     try std.testing.expectEqualStrings("https://api.kimi.com/coding/v1", compatibleProviderUrl("kimi-code").?);
@@ -576,6 +578,7 @@ test "new providers display names" {
     try std.testing.expectEqualStrings("Hugging Face", compatibleProviderDisplayName("huggingface"));
     try std.testing.expectEqualStrings("vLLM", compatibleProviderDisplayName("vllm"));
     try std.testing.expectEqualStrings("OVHcloud", compatibleProviderDisplayName("ovhcloud"));
+    try std.testing.expectEqualStrings("Novita", compatibleProviderDisplayName("novita"));
     try std.testing.expectEqualStrings("Custom", compatibleProviderDisplayName("nonexistent"));
     try std.testing.expectEqualStrings("Telnyx", compatibleProviderDisplayName("telnyx"));
 }
@@ -588,6 +591,7 @@ test "new providers classify as compatible" {
     try std.testing.expect(classifyProvider("lm-studio") == .compatible_provider);
     try std.testing.expect(classifyProvider("astrai") == .compatible_provider);
     try std.testing.expect(classifyProvider("telnyx") == .compatible_provider);
+    try std.testing.expect(classifyProvider("novita") == .compatible_provider);
 }
 
 test "findCompatProvider returns correct flags" {
