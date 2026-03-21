@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 const sse = @import("sse.zig");
 const error_classify = @import("error_classify.zig");
@@ -29,6 +30,22 @@ fn logCompatibleApiError(
 
     const preview = sanitized orelse "<api error body unavailable>";
     log.err("{s} {s}: {s} {s}", .{ provider_name, @errorName(err), url, preview });
+}
+
+fn returnLoggedCompatibleApiError(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    provider_name: []const u8,
+    err: anyerror,
+    url: []const u8,
+    resp_body: []const u8,
+) anyerror!T {
+    // Tests assert error propagation on this path; skip log side effects there
+    // because Zig's test runner treats unexpected stderr logs as failures.
+    if (!builtin.is_test) {
+        logCompatibleApiError(allocator, provider_name, err, url, resp_body);
+    }
+    return err;
 }
 
 fn parseStatusCodeValue(value: std.json.Value) ?u16 {
@@ -1450,9 +1467,8 @@ pub const OpenAiCompatibleProvider = struct {
                     .temperature = temperature,
                     .timeout_secs = 0,
                 };
-                const fallback_resp = self.chatViaResponses(allocator, fallback_request, effective_model, temperature, 0) catch {
-                    logCompatibleApiError(allocator, self.name, err, url, resp_body);
-                    return err;
+                const fallback_resp = self.chatViaResponses(allocator, fallback_request, effective_model, temperature, 0) catch |fallback_err| {
+                    return returnLoggedCompatibleApiError([]const u8, allocator, self.name, fallback_err, url, resp_body);
                 };
                 defer {
                     if (fallback_resp.content) |text| allocator.free(text);
@@ -2344,6 +2360,22 @@ test "shouldFallbackToResponses only for explicit 404 payloads" {
     try std.testing.expect(!shouldFallbackToResponses(std.testing.allocator, "{\"error\":{\"message\":\"temporary overload\",\"code\":503}}"));
     try std.testing.expect(!shouldFallbackToResponses(std.testing.allocator, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"));
     try std.testing.expect(!shouldFallbackToResponses(std.testing.allocator, "not json at all"));
+}
+
+test "returnLoggedCompatibleApiError preserves fallback error" {
+    // Regression: when chat-completions 404 falls back to Responses, a failure
+    // on the second request must surface the Responses error, not the original one.
+    try std.testing.expectError(
+        error.RateLimited,
+        returnLoggedCompatibleApiError(
+            void,
+            std.testing.allocator,
+            "test",
+            error.RateLimited,
+            "https://example.com/v1/chat/completions",
+            "{\"error\":{\"message\":\"Too many requests\",\"status\":429}}",
+        ),
+    );
 }
 
 test "responsesUrl requires exact suffix match" {
