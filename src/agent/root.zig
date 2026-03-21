@@ -801,18 +801,89 @@ pub const Agent = struct {
     }
 
     fn shouldForceActionFollowThrough(text: []const u8) bool {
+        // Specific "let me <action-verb>" and "i'll/i will <action-verb>" phrases.
+        // Kept as explicit verb+phrase pairs to avoid false-positives on conclusory
+        // statements like "I'll note that…", "Let me know if…", or "I will summarize…".
         const ascii_patterns = [_][]const u8{
+            // try / retry / attempt
             "i'll try",
             "i will try",
             "let me try",
-            "i'll check",
-            "i will check",
-            "let me check",
             "i'll retry",
             "i will retry",
             "let me retry",
             "i'll attempt",
             "i will attempt",
+            "let me attempt",
+            // check / look / verify
+            "i'll check",
+            "i will check",
+            "let me check",
+            "i'll look into",
+            "i will look into",
+            "let me look into",
+            "i'll look up",
+            "i will look up",
+            "let me look up",
+            "i'll verify",
+            "i will verify",
+            "let me verify",
+            // fetch / get / retrieve
+            "i'll fetch",
+            "i will fetch",
+            "let me fetch",
+            "i'll get the",
+            "i will get the",
+            "let me get the",
+            "i'll get that",
+            "i will get that",
+            "let me get that",
+            "i'll get this",
+            "i will get this",
+            "let me get this",
+            "i'll get it",
+            "i will get it",
+            "let me get it",
+            "i'll retrieve",
+            "i will retrieve",
+            "let me retrieve",
+            // find / search
+            "i'll find",
+            "i will find",
+            "let me find",
+            "i'll search",
+            "i will search",
+            "let me search",
+            // read / open / load
+            "i'll read",
+            "i will read",
+            "let me read",
+            "i'll open",
+            "i will open",
+            "let me open",
+            "i'll load",
+            "i will load",
+            "let me load",
+            // run / execute
+            "i'll run the",
+            "i will run the",
+            "let me run the",
+            "i'll run that",
+            "i will run that",
+            "let me run that",
+            "i'll run it",
+            "i will run it",
+            "let me run it",
+            "i'll execute the",
+            "i will execute the",
+            "let me execute the",
+            "i'll execute that",
+            "i will execute that",
+            "let me execute that",
+            "i'll execute it",
+            "i will execute it",
+            "let me execute it",
+            // do / do that
             "i'll do that now",
             "i will do that now",
             "doing that now",
@@ -2078,8 +2149,7 @@ pub const Agent = struct {
 
                 if (trimmed_display_text.len == 0) {
                     self.freeResponseFields(&response);
-                    if (!is_streaming and
-                        empty_response_retry_count < 1 and
+                    if (empty_response_retry_count < 1 and
                         iteration + 1 < self.max_tool_iterations)
                     {
                         try self.appendOwnedHistoryMessage(.{ .role = .user, .content = try self.allocator.dupe(u8, "SYSTEM: Your previous reply was empty. Respond with a direct user-visible answer or emit the necessary tool call(s). Do not return an empty response.") });
@@ -2093,8 +2163,9 @@ pub const Agent = struct {
                 // Guardrail: if the model promises "I'll try/check now" but emits no
                 // tool call, force one follow-up completion to either act now or
                 // explicitly state the limitation without deferred promises.
-                if (!is_streaming and
-                    forced_follow_through_count < 2 and
+                // This applies in both streaming and non-streaming paths: the follow-up
+                // iteration will stream its own chunks independently.
+                if (forced_follow_through_count < 2 and
                     iteration + 1 < self.max_tool_iterations and
                     shouldForceActionFollowThrough(display_text))
                 {
@@ -8294,6 +8365,26 @@ test "Agent falls back to blocking chat when stream ctx is missing" {
 test "Agent shouldForceActionFollowThrough detects english deferred promise" {
     try std.testing.expect(Agent.shouldForceActionFollowThrough("I'll try again with a different filename now."));
     try std.testing.expect(Agent.shouldForceActionFollowThrough("let me check that and get back in a moment"));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("I'll look into that for you"));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("I will fetch the file now"));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("Let me search for that"));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("I'll run the tool now"));
+    // Regression: "let me get/fetch/find" must be caught (was the exact failure mode with vikunja-mcp)
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("Found the Workstream Board (project ID 4). Let me get the Kanban columns (buckets) for it."));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("Let me fetch the list of projects."));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("Let me look up the tasks now."));
+}
+
+test "Agent shouldForceActionFollowThrough ignores conclusory english statements" {
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("Let me know if you need anything else."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("Let me show you how this works with a small example."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("Let me list the main tradeoffs before the code."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("I will call this helper once during initialization."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("I'll use a simple example to explain the flow."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("Let me get straight to the point."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("I'll note that this is a known limitation."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("I will summarize what I found: the directory contains 3 files."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("I cannot do that in this environment."));
 }
 
 test "Agent shouldForceActionFollowThrough detects russian deferred promise" {
@@ -8489,6 +8580,270 @@ test "Agent returns NoResponseContent after repeated empty final responses" {
 
     try std.testing.expectError(error.NoResponseContent, agent.turn("hello"));
     try std.testing.expectEqual(@as(usize, 2), provider_state.call_count);
+}
+
+test "Agent retries empty streaming response once" {
+    const EmptyThenRecoveredStreamingProvider = struct {
+        const Self = @This();
+
+        call_count: usize = 0,
+        saw_empty_retry_prompt: bool = false,
+
+        fn chatWithSystem(_: *anyopaque, allocator: std.mem.Allocator, _: ?[]const u8, _: []const u8, _: []const u8, _: f64) anyerror![]const u8 {
+            return allocator.dupe(u8, "");
+        }
+
+        fn chat(_: *anyopaque, _: std.mem.Allocator, _: providers.ChatRequest, _: []const u8, _: f64) anyerror!providers.ChatResponse {
+            return error.ShouldUseStreamChat;
+        }
+
+        fn supportsNativeTools(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn supportsStreaming(_: *anyopaque) bool {
+            return true;
+        }
+
+        fn streamChat(
+            ptr: *anyopaque,
+            allocator: std.mem.Allocator,
+            request: providers.ChatRequest,
+            _: []const u8,
+            _: f64,
+            callback: providers.StreamCallback,
+            callback_ctx: *anyopaque,
+        ) anyerror!providers.StreamChatResult {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.call_count += 1;
+
+            if (self.call_count == 2) {
+                for (request.messages) |msg| {
+                    if (msg.role == .user and
+                        std.mem.indexOf(u8, msg.content, "Your previous reply was empty") != null)
+                    {
+                        self.saw_empty_retry_prompt = true;
+                        break;
+                    }
+                }
+                callback(callback_ctx, providers.StreamChunk.textDelta("recovered"));
+                callback(callback_ctx, providers.StreamChunk.finalChunk());
+                return .{
+                    .content = try allocator.dupe(u8, "recovered"),
+                    .usage = .{},
+                    .model = try allocator.dupe(u8, "test-model"),
+                };
+            }
+
+            callback(callback_ctx, providers.StreamChunk.finalChunk());
+            return .{
+                .content = null,
+                .usage = .{},
+                .model = try allocator.dupe(u8, "test-model"),
+            };
+        }
+
+        fn getName(_: *anyopaque) []const u8 {
+            return "empty-then-recovered-streaming-provider";
+        }
+
+        fn deinitFn(_: *anyopaque) void {}
+    };
+
+    const StreamCollector = struct {
+        chunks: std.ArrayListUnmanaged(u8) = .empty,
+
+        fn callback(ctx: *anyopaque, chunk: providers.StreamChunk) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!chunk.is_final and chunk.delta.len > 0) {
+                self.chunks.appendSlice(std.testing.allocator, chunk.delta) catch unreachable;
+            }
+        }
+
+        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.chunks.deinit(allocator);
+        }
+    };
+
+    const allocator = std.testing.allocator;
+
+    var provider_state = EmptyThenRecoveredStreamingProvider{};
+    const provider_vtable = Provider.VTable{
+        .chatWithSystem = EmptyThenRecoveredStreamingProvider.chatWithSystem,
+        .chat = EmptyThenRecoveredStreamingProvider.chat,
+        .supportsNativeTools = EmptyThenRecoveredStreamingProvider.supportsNativeTools,
+        .getName = EmptyThenRecoveredStreamingProvider.getName,
+        .deinit = EmptyThenRecoveredStreamingProvider.deinitFn,
+        .supports_streaming = EmptyThenRecoveredStreamingProvider.supportsStreaming,
+        .stream_chat = EmptyThenRecoveredStreamingProvider.streamChat,
+    };
+
+    var noop = observability.NoopObserver{};
+    var agent = Agent{
+        .allocator = allocator,
+        .provider = .{ .ptr = @ptrCast(&provider_state), .vtable = &provider_vtable },
+        .tools = &.{},
+        .tool_specs = try allocator.alloc(ToolSpec, 0),
+        .mem = null,
+        .observer = noop.observer(),
+        .model_name = "test-model",
+        .temperature = 0.7,
+        .workspace_dir = ".",
+        .max_tool_iterations = 4,
+        .max_history_messages = 50,
+        .auto_save = false,
+        .history = .empty,
+        .total_tokens = 0,
+        .has_system_prompt = false,
+    };
+    defer agent.deinit();
+
+    var collector = StreamCollector{};
+    defer collector.deinit(allocator);
+    agent.stream_callback = StreamCollector.callback;
+    agent.stream_ctx = @ptrCast(&collector);
+
+    const response = try agent.turn("hello");
+    defer allocator.free(response);
+
+    try std.testing.expectEqualStrings("recovered", response);
+    try std.testing.expectEqualStrings("recovered", collector.chunks.items);
+    try std.testing.expectEqual(@as(usize, 2), provider_state.call_count);
+    try std.testing.expect(provider_state.saw_empty_retry_prompt);
+}
+
+test "Agent forces follow-through retry for streaming deferred promise" {
+    const DeferredPromiseStreamingProvider = struct {
+        const Self = @This();
+
+        call_count: usize = 0,
+        saw_follow_through_prompt: bool = false,
+
+        fn chatWithSystem(_: *anyopaque, allocator: std.mem.Allocator, _: ?[]const u8, _: []const u8, _: []const u8, _: f64) anyerror![]const u8 {
+            return allocator.dupe(u8, "");
+        }
+
+        fn chat(_: *anyopaque, _: std.mem.Allocator, _: providers.ChatRequest, _: []const u8, _: f64) anyerror!providers.ChatResponse {
+            return error.ShouldUseStreamChat;
+        }
+
+        fn supportsNativeTools(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn supportsStreaming(_: *anyopaque) bool {
+            return true;
+        }
+
+        fn streamChat(
+            ptr: *anyopaque,
+            allocator: std.mem.Allocator,
+            request: providers.ChatRequest,
+            _: []const u8,
+            _: f64,
+            callback: providers.StreamCallback,
+            callback_ctx: *anyopaque,
+        ) anyerror!providers.StreamChatResult {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.call_count += 1;
+
+            if (self.call_count == 2) {
+                for (request.messages) |msg| {
+                    if (msg.role == .user and
+                        std.mem.indexOf(u8, msg.content, "You just promised to take action now") != null)
+                    {
+                        self.saw_follow_through_prompt = true;
+                        break;
+                    }
+                }
+                callback(callback_ctx, providers.StreamChunk.textDelta("I cannot access that tool in this environment."));
+                callback(callback_ctx, providers.StreamChunk.finalChunk());
+                return .{
+                    .content = try allocator.dupe(u8, "I cannot access that tool in this environment."),
+                    .usage = .{},
+                    .model = try allocator.dupe(u8, "test-model"),
+                };
+            }
+
+            // Regression: A2A streaming replies like this must trigger a follow-up iteration.
+            const deferred = "Found the Workstream Board (project ID 4). Let me get the Kanban columns (buckets) for it.";
+            callback(callback_ctx, providers.StreamChunk.textDelta(deferred));
+            callback(callback_ctx, providers.StreamChunk.finalChunk());
+            return .{
+                .content = try allocator.dupe(u8, deferred),
+                .usage = .{},
+                .model = try allocator.dupe(u8, "test-model"),
+            };
+        }
+
+        fn getName(_: *anyopaque) []const u8 {
+            return "deferred-promise-streaming-provider";
+        }
+
+        fn deinitFn(_: *anyopaque) void {}
+    };
+
+    const StreamCollector = struct {
+        chunks: std.ArrayListUnmanaged(u8) = .empty,
+
+        fn callback(ctx: *anyopaque, chunk: providers.StreamChunk) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!chunk.is_final and chunk.delta.len > 0) {
+                self.chunks.appendSlice(std.testing.allocator, chunk.delta) catch unreachable;
+            }
+        }
+
+        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.chunks.deinit(allocator);
+        }
+    };
+
+    const allocator = std.testing.allocator;
+
+    var provider_state = DeferredPromiseStreamingProvider{};
+    const provider_vtable = Provider.VTable{
+        .chatWithSystem = DeferredPromiseStreamingProvider.chatWithSystem,
+        .chat = DeferredPromiseStreamingProvider.chat,
+        .supportsNativeTools = DeferredPromiseStreamingProvider.supportsNativeTools,
+        .getName = DeferredPromiseStreamingProvider.getName,
+        .deinit = DeferredPromiseStreamingProvider.deinitFn,
+        .supports_streaming = DeferredPromiseStreamingProvider.supportsStreaming,
+        .stream_chat = DeferredPromiseStreamingProvider.streamChat,
+    };
+
+    var noop = observability.NoopObserver{};
+    var agent = Agent{
+        .allocator = allocator,
+        .provider = .{ .ptr = @ptrCast(&provider_state), .vtable = &provider_vtable },
+        .tools = &.{},
+        .tool_specs = try allocator.alloc(ToolSpec, 0),
+        .mem = null,
+        .observer = noop.observer(),
+        .model_name = "test-model",
+        .temperature = 0.7,
+        .workspace_dir = ".",
+        .max_tool_iterations = 4,
+        .max_history_messages = 50,
+        .auto_save = false,
+        .history = .empty,
+        .total_tokens = 0,
+        .has_system_prompt = false,
+    };
+    defer agent.deinit();
+
+    var collector = StreamCollector{};
+    defer collector.deinit(allocator);
+    agent.stream_callback = StreamCollector.callback;
+    agent.stream_ctx = @ptrCast(&collector);
+
+    const response = try agent.turn("hello");
+    defer allocator.free(response);
+
+    try std.testing.expectEqualStrings("I cannot access that tool in this environment.", response);
+    try std.testing.expect(std.mem.indexOf(u8, collector.chunks.items, "Let me get the Kanban columns") != null);
+    try std.testing.expect(std.mem.indexOf(u8, collector.chunks.items, "I cannot access that tool in this environment.") != null);
+    try std.testing.expectEqual(@as(usize, 2), provider_state.call_count);
+    try std.testing.expect(provider_state.saw_follow_through_prompt);
 }
 
 test "Agent.fromConfig sets exec_security=full for full autonomy" {
