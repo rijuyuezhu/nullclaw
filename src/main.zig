@@ -2569,8 +2569,15 @@ fn runGatewayChannel(allocator: std.mem.Allocator, config: *const yc.config.Conf
     var registry = yc.channels.dispatch.ChannelRegistry.init(allocator);
     defer registry.deinit();
 
+    // Create event bus for message handling
+    var event_bus = yc.bus.Bus.init();
+    defer event_bus.close();
+
     const mgr = try yc.channel_manager.ChannelManager.init(allocator, config, &registry);
     defer mgr.deinit();
+
+    // Attach event bus so channels can publish inbound messages
+    mgr.setEventBus(&event_bus);
 
     try mgr.collectConfiguredChannels();
 
