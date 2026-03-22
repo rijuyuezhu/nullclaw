@@ -1900,6 +1900,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             if (gw.object.get("paired_tokens")) |v| {
                 if (v == .array) self.gateway.paired_tokens = try parseStringArray(self.allocator, v.array);
             }
+            if (gw.object.get("max_body_size_bytes")) |v| {
+                if (v == .integer) self.gateway.max_body_size_bytes = @intCast(v.integer);
+            }
         }
     }
 

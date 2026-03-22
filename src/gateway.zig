@@ -2135,7 +2135,7 @@ fn headerEndOffset(raw: []const u8) ?usize {
     return pos + separator.len;
 }
 
-fn expectedHttpRequestSize(raw: []const u8) !?usize {
+fn expectedHttpRequestSize(raw: []const u8, max_body: usize) !?usize {
     const header_end = headerEndOffset(raw) orelse {
         if (raw.len > MAX_HEADER_SIZE) return error.RequestTooLarge;
         return null;
@@ -2148,10 +2148,10 @@ fn expectedHttpRequestSize(raw: []const u8) !?usize {
     if (trimmed.len == 0) return error.InvalidContentLength;
 
     const content_length = std.fmt.parseInt(usize, trimmed, 10) catch return error.InvalidContentLength;
-    if (content_length > MAX_BODY_SIZE) return error.RequestTooLarge;
+    if (content_length > max_body) return error.RequestTooLarge;
 
     const total = std.math.add(usize, header_end, content_length) catch return error.RequestTooLarge;
-    if (total > MAX_HTTP_REQUEST_SIZE) return error.RequestTooLarge;
+    if (total > MAX_HEADER_SIZE + max_body) return error.RequestTooLarge;
     return total;
 }
 
@@ -2170,7 +2170,7 @@ fn configureRequestReadTimeout(stream: *std.net.Stream) void {
     ) catch {};
 }
 
-fn readHttpRequestFromReader(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
+fn readHttpRequestFromReader(allocator: std.mem.Allocator, reader: anytype, max_body: usize) ![]u8 {
     var request_buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer request_buf.deinit(allocator);
 
@@ -2185,10 +2185,10 @@ fn readHttpRequestFromReader(allocator: std.mem.Allocator, reader: anytype) ![]u
         if (n == 0) return error.IncompleteRequest;
 
         try request_buf.appendSlice(allocator, chunk[0..n]);
-        if (request_buf.items.len > MAX_HTTP_REQUEST_SIZE) return error.RequestTooLarge;
+        if (request_buf.items.len > MAX_HEADER_SIZE + max_body) return error.RequestTooLarge;
 
         if (expected_total == null) {
-            expected_total = try expectedHttpRequestSize(request_buf.items);
+            expected_total = try expectedHttpRequestSize(request_buf.items, max_body);
         }
 
         if (expected_total) |total| {
@@ -2200,8 +2200,8 @@ fn readHttpRequestFromReader(allocator: std.mem.Allocator, reader: anytype) ![]u
     }
 }
 
-fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream) ![]u8 {
-    return readHttpRequestFromReader(allocator, stream);
+fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream, max_body: usize) ![]u8 {
+    return readHttpRequestFromReader(allocator, stream, max_body);
 }
 
 const CONTENT_TYPE_JSON = "application/json";
@@ -5158,7 +5158,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
         const req_allocator = arena.allocator();
 
         // Read full HTTP request (headers + optional body).
-        const raw = readHttpRequest(req_allocator, &conn.stream) catch |err| {
+        const max_body = if (config_opt) |c| c.gateway.max_body_size_bytes else MAX_BODY_SIZE;
+        const raw = readHttpRequest(req_allocator, &conn.stream, max_body) catch |err| {
             switch (err) {
                 error.RequestTooLarge => writeJsonResponse(&conn.stream, "413 Payload Too Large", "{\"error\":\"request too large\"}"),
                 error.InvalidContentLength => writeJsonResponse(&conn.stream, "400 Bad Request", "{\"error\":\"invalid content-length\"}"),
@@ -5994,7 +5995,7 @@ test "rate limiter window_ns calculation" {
     try std.testing.expectEqual(@as(i128, 120_000_000_000), limiter.window_ns);
 }
 
-test "MAX_BODY_SIZE is 64KB" {
+test "MAX_BODY_SIZE is 64KB (default)" {
     try std.testing.expectEqual(@as(usize, 64 * 1024), MAX_BODY_SIZE);
 }
 
@@ -7710,34 +7711,34 @@ test "extractBody returns null for no separator" {
 
 test "expectedHttpRequestSize returns null when headers are incomplete" {
     const raw = "GET /health HTTP/1.1\r\nHost: localhost\r\n";
-    try std.testing.expect(try expectedHttpRequestSize(raw) == null);
+    try std.testing.expect(try expectedHttpRequestSize(raw, MAX_BODY_SIZE) == null);
 }
 
 test "expectedHttpRequestSize rejects oversized incomplete headers" {
     const raw = try std.testing.allocator.alloc(u8, MAX_HEADER_SIZE + 1);
     defer std.testing.allocator.free(raw);
     for (raw) |*byte| byte.* = 'a';
-    try std.testing.expectError(error.RequestTooLarge, expectedHttpRequestSize(raw));
+    try std.testing.expectError(error.RequestTooLarge, expectedHttpRequestSize(raw, MAX_BODY_SIZE));
 }
 
 test "expectedHttpRequestSize returns header length for requests without body" {
     const raw = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    try std.testing.expectEqual(raw.len, (try expectedHttpRequestSize(raw)).?);
+    try std.testing.expectEqual(raw.len, (try expectedHttpRequestSize(raw, MAX_BODY_SIZE)).?);
 }
 
 test "expectedHttpRequestSize includes content length payload" {
     const raw = "POST /webhook HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello";
-    try std.testing.expectEqual(raw.len, (try expectedHttpRequestSize(raw)).?);
+    try std.testing.expectEqual(raw.len, (try expectedHttpRequestSize(raw, MAX_BODY_SIZE)).?);
 }
 
 test "expectedHttpRequestSize rejects invalid content length" {
     const raw = "POST /webhook HTTP/1.1\r\nHost: localhost\r\nContent-Length: abc\r\n\r\nhello";
-    try std.testing.expectError(error.InvalidContentLength, expectedHttpRequestSize(raw));
+    try std.testing.expectError(error.InvalidContentLength, expectedHttpRequestSize(raw, MAX_BODY_SIZE));
 }
 
 test "expectedHttpRequestSize rejects oversized content length" {
     const raw = "POST /webhook HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999999\r\n\r\n";
-    try std.testing.expectError(error.RequestTooLarge, expectedHttpRequestSize(raw));
+    try std.testing.expectError(error.RequestTooLarge, expectedHttpRequestSize(raw, MAX_BODY_SIZE));
 }
 
 test "readHttpRequestFromReader assembles fragmented request" {
@@ -7770,7 +7771,7 @@ test "readHttpRequestFromReader assembles fragmented request" {
     };
     var reader = ChunkedReader{ .chunks = chunks[0..] };
 
-    const raw = try readHttpRequestFromReader(std.testing.allocator, &reader);
+    const raw = try readHttpRequestFromReader(std.testing.allocator, &reader, MAX_BODY_SIZE);
     defer std.testing.allocator.free(raw);
     try std.testing.expectEqualStrings(expected, raw);
 }
@@ -7801,7 +7802,7 @@ test "readHttpRequestFromReader returns IncompleteRequest for truncated body" {
         "POST /pair HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\n\r\nabc",
     };
     var reader = ChunkedReader{ .chunks = chunks[0..] };
-    try std.testing.expectError(error.IncompleteRequest, readHttpRequestFromReader(std.testing.allocator, &reader));
+    try std.testing.expectError(error.IncompleteRequest, readHttpRequestFromReader(std.testing.allocator, &reader, MAX_BODY_SIZE));
 }
 
 test "readHttpRequestFromReader maps WouldBlock to RequestTimeout" {
@@ -7814,7 +7815,7 @@ test "readHttpRequestFromReader maps WouldBlock to RequestTimeout" {
     };
 
     var reader = TimeoutReader{};
-    try std.testing.expectError(error.RequestTimeout, readHttpRequestFromReader(std.testing.allocator, &reader));
+    try std.testing.expectError(error.RequestTimeout, readHttpRequestFromReader(std.testing.allocator, &reader, MAX_BODY_SIZE));
 }
 
 test "userFacingAgentError maps ProviderDoesNotSupportVision" {
