@@ -30,6 +30,7 @@ const buildConversationContext = @import("agent/prompt.zig").buildConversationCo
 const thread_stacks = @import("thread_stacks.zig");
 const tunnel_mod = @import("tunnel.zig");
 const Atomic = @import("portable_atomic.zig").Atomic;
+const observability = @import("observability.zig");
 
 const log = std.log.scoped(.daemon);
 
@@ -402,7 +403,27 @@ fn mergeSchedulerTickChangesAndSave(
 /// so tasks created/updated after daemon startup are picked up without restart.
 fn schedulerThread(allocator: std.mem.Allocator, config: *const Config, state: *DaemonState, event_bus: *bus_mod.Bus) void {
     const gateway_mod = @import("gateway.zig");
+    
+    const runtime_observer = observability.RuntimeObserver.create(
+        allocator,
+        .{
+            .workspace_dir = config.workspace_dir,
+            .backend = config.diagnostics.backend,
+            .otel_endpoint = config.diagnostics.otel_endpoint,
+            .otel_service_name = config.diagnostics.otel_service_name,
+        },
+        config.diagnostics.otel_headers,
+        &.{},
+    ) catch blk: {
+        log.warn("Failed to create scheduler runtime observer, falling back to noop", .{});
+        break :blk null;
+    };
+    defer if (runtime_observer) |ro| ro.deinit();
+
     var scheduler = CronScheduler.init(allocator, config.scheduler.max_tasks, config.scheduler.enabled);
+    if (runtime_observer) |ro| {
+        scheduler.observer = ro.observer();
+    }
     scheduler.setShellCwd(config.workspace_dir);
     scheduler.setAgentTimeoutSecs(config.scheduler.agent_timeout_secs);
     defer scheduler.deinit();

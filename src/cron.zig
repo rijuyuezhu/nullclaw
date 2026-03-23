@@ -406,6 +406,7 @@ pub const CronScheduler = struct {
     allocator: std.mem.Allocator,
     shell_cwd: ?[]const u8 = null,
     agent_timeout_secs: u64 = 0,
+    observer: ?@import("observability.zig").Observer = null,
 
     pub fn init(allocator: std.mem.Allocator, max_tasks: usize, enabled: bool) CronScheduler {
         return .{
@@ -778,6 +779,17 @@ pub const CronScheduler = struct {
         for (self.jobs.items, 0..) |*job, idx| {
             if (job.paused or job.next_run_secs > now) continue;
             changed = true;
+
+            if (self.observer) |obs| {
+                const event = @import("observability.zig").ObserverEvent{
+                    .cron_job_start = .{
+                        .task = job.command,
+                        .channel = null,
+                        .bot_account = null,
+                    }
+                };
+                obs.recordEvent(&event);
+            }
 
             switch (job.job_type) {
                 .shell => {
