@@ -111,6 +111,29 @@ fn splitPrimaryModelRef(primary: []const u8) ?PrimaryModelRef {
     };
 }
 
+fn splitPrimaryModelRefWithProviders(primary: []const u8, providers: []const types.ProviderEntry) ?PrimaryModelRef {
+    var best_provider: ?[]const u8 = null;
+
+    for (providers) |entry| {
+        if (entry.name.len == 0 or entry.name.len >= primary.len) continue;
+        if (!std.mem.startsWith(u8, primary, entry.name)) continue;
+        if (primary[entry.name.len] != '/') continue;
+
+        if (best_provider == null or entry.name.len > best_provider.?.len) {
+            best_provider = entry.name;
+        }
+    }
+
+    if (best_provider) |provider| {
+        return .{
+            .provider = provider,
+            .model = primary[provider.len + 1 ..],
+        };
+    }
+
+    return splitPrimaryModelRef(primary);
+}
+
 fn parseDiagnosticsOtelHeaders(
     allocator: std.mem.Allocator,
     value: std.json.Value,
@@ -150,6 +173,7 @@ fn parseNamedAgentObject(
     config_path: []const u8,
     agent_name: []const u8,
     item: std.json.Value,
+    providers: []const types.ProviderEntry,
 ) !?types.NamedAgentConfig {
     if (item != .object) return null;
 
@@ -178,7 +202,7 @@ fn parseNamedAgentObject(
         }
 
         if (m == .string) {
-            if (splitPrimaryModelRef(m.string)) |parsed_ref| {
+            if (splitPrimaryModelRefWithProviders(m.string, providers)) |parsed_ref| {
                 break :blk parsed_ref;
             }
             break :blk null;
@@ -186,7 +210,7 @@ fn parseNamedAgentObject(
         if (m == .object) {
             if (m.object.get("primary")) |mp| {
                 if (mp == .string) {
-                    if (splitPrimaryModelRef(mp.string)) |parsed_ref| {
+                    if (splitPrimaryModelRefWithProviders(mp.string, providers)) |parsed_ref| {
                         break :blk parsed_ref;
                     }
                 }
@@ -764,6 +788,55 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
         }
     }
 
+    // models.providers (object-of-objects: {"models": {"providers": {"openrouter": {"api_key": "..."}, ...}}})
+    if (root.get("models")) |models| {
+        if (models == .object) {
+            if (models.object.get("providers")) |prov| {
+                if (prov == .object) {
+                    var prov_list: std.ArrayListUnmanaged(types.ProviderEntry) = .empty;
+                    var prov_it = prov.object.iterator();
+                    while (prov_it.next()) |entry| {
+                        const prov_name = entry.key_ptr.*;
+                        const val = entry.value_ptr.*;
+                        if (val != .object) continue;
+                        var pe = types.ProviderEntry{
+                            .name = try self.allocator.dupe(u8, prov_name),
+                        };
+                        if (val.object.get("api_key")) |ak| {
+                            pe.api_key = try parseApiKeyField(self, ak);
+                        }
+                        if (val.object.get("base_url")) |ab| {
+                            if (ab == .string) pe.base_url = try self.allocator.dupe(u8, ab.string);
+                        }
+                        // Accept "api_url" as an alias for "base_url" (fallback if base_url wasn't set)
+                        if (pe.base_url == null) {
+                            if (val.object.get("api_url")) |au| {
+                                if (au == .string) pe.base_url = try self.allocator.dupe(u8, au.string);
+                            }
+                        }
+                        if (val.object.get("native_tools")) |nt| {
+                            if (nt == .bool) pe.native_tools = nt.bool;
+                        }
+                        if (val.object.get("user_agent")) |ua| {
+                            if (ua == .string) pe.user_agent = try self.allocator.dupe(u8, ua.string);
+                        }
+                        if (val.object.get("api_mode")) |am| {
+                            if (am == .string) pe.api_mode = types.ProviderEntry.ApiMode.parse(am.string);
+                        }
+                        if (val.object.get("chat_template_enable_thinking_param")) |ctp| {
+                            if (ctp == .bool) pe.chat_template_enable_thinking_param = ctp.bool;
+                        }
+                        if (val.object.get("max_streaming_prompt_bytes")) |mb| {
+                            if (mb == .integer and mb.integer >= 0) pe.max_streaming_prompt_bytes = @intCast(mb.integer);
+                        }
+                        try prov_list.append(self.allocator, pe);
+                    }
+                    self.providers = try prov_list.toOwnedSlice(self.allocator);
+                }
+            }
+        }
+    }
+
     // Agents section: agents.defaults.model.primary (provider/model) + agents.defaults.heartbeat + agents.list[]
     if (root.get("agents")) |agents_val| {
         if (agents_val == .object) {
@@ -777,7 +850,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                 if (v == .string) {
                                     // Always try to parse primary field - it may contain full provider/model info
                                     // or just the model part (when legacy default_provider exists)
-                                    if (splitPrimaryModelRef(v.string)) |parsed_ref| {
+                                    if (splitPrimaryModelRefWithProviders(v.string, self.providers)) |parsed_ref| {
                                         self.default_model = try self.allocator.dupe(u8, parsed_ref.model);
                                         // Only update provider if not already set from legacy field
                                         if (!self.legacy_default_provider_detected) {
@@ -840,7 +913,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         if (item == .object) {
                             const name_val = item.object.get("id") orelse item.object.get("name") orelse continue;
                             if (name_val != .string) continue;
-                            var agent_cfg = try parseNamedAgentObject(self.allocator, self.config_path, name_val.string, item) orelse continue;
+                            var agent_cfg = try parseNamedAgentObject(self.allocator, self.config_path, name_val.string, item, self.providers) orelse continue;
                             errdefer freeNamedAgentConfig(self.allocator, &agent_cfg);
                             try list.append(self.allocator, agent_cfg);
                         }
@@ -861,7 +934,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 while (it.next()) |entry| {
                     const key = entry.key_ptr.*;
                     if (std.mem.eql(u8, key, "defaults") or std.mem.eql(u8, key, "list")) continue;
-                    var agent_cfg = try parseNamedAgentObject(self.allocator, self.config_path, key, entry.value_ptr.*) orelse continue;
+                    var agent_cfg = try parseNamedAgentObject(self.allocator, self.config_path, key, entry.value_ptr.*, self.providers) orelse continue;
                     errdefer freeNamedAgentConfig(self.allocator, &agent_cfg);
                     try named_agent_list.append(self.allocator, agent_cfg);
                 }
@@ -2216,55 +2289,6 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         if (up == .string) cst_cfg.url_pattern = try self.allocator.dupe(u8, up.string);
                     }
                     self.tunnel.custom = cst_cfg;
-                }
-            }
-        }
-    }
-
-    // models.providers (object-of-objects: {"models": {"providers": {"openrouter": {"api_key": "..."}, ...}}})
-    if (root.get("models")) |models| {
-        if (models == .object) {
-            if (models.object.get("providers")) |prov| {
-                if (prov == .object) {
-                    var prov_list: std.ArrayListUnmanaged(types.ProviderEntry) = .empty;
-                    var prov_it = prov.object.iterator();
-                    while (prov_it.next()) |entry| {
-                        const prov_name = entry.key_ptr.*;
-                        const val = entry.value_ptr.*;
-                        if (val != .object) continue;
-                        var pe = types.ProviderEntry{
-                            .name = try self.allocator.dupe(u8, prov_name),
-                        };
-                        if (val.object.get("api_key")) |ak| {
-                            pe.api_key = try parseApiKeyField(self, ak);
-                        }
-                        if (val.object.get("base_url")) |ab| {
-                            if (ab == .string) pe.base_url = try self.allocator.dupe(u8, ab.string);
-                        }
-                        // Accept "api_url" as an alias for "base_url" (fallback if base_url wasn't set)
-                        if (pe.base_url == null) {
-                            if (val.object.get("api_url")) |au| {
-                                if (au == .string) pe.base_url = try self.allocator.dupe(u8, au.string);
-                            }
-                        }
-                        if (val.object.get("native_tools")) |nt| {
-                            if (nt == .bool) pe.native_tools = nt.bool;
-                        }
-                        if (val.object.get("user_agent")) |ua| {
-                            if (ua == .string) pe.user_agent = try self.allocator.dupe(u8, ua.string);
-                        }
-                        if (val.object.get("api_mode")) |am| {
-                            if (am == .string) pe.api_mode = types.ProviderEntry.ApiMode.parse(am.string);
-                        }
-                        if (val.object.get("chat_template_enable_thinking_param")) |ctp| {
-                            if (ctp == .bool) pe.chat_template_enable_thinking_param = ctp.bool;
-                        }
-                        if (val.object.get("max_streaming_prompt_bytes")) |mb| {
-                            if (mb == .integer and mb.integer >= 0) pe.max_streaming_prompt_bytes = @intCast(mb.integer);
-                        }
-                        try prov_list.append(self.allocator, pe);
-                    }
-                    self.providers = try prov_list.toOwnedSlice(self.allocator);
                 }
             }
         }
