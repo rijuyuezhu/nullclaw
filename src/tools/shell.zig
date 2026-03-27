@@ -86,6 +86,13 @@ fn validatePathEnvValue(
     return true;
 }
 
+fn wrapCommandArgv(sandbox: ?Sandbox, base_argv: []const []const u8, wrap_buf: [][]const u8) ![]const []const u8 {
+    if (sandbox) |sb| {
+        return sb.wrapCommand(base_argv, wrap_buf);
+    }
+    return base_argv;
+}
+
 fn normalizeCommandInput(command: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, command, " \t\r\n");
     if (unwrapMarkdownFence(trimmed)) |unfenced| {
@@ -249,10 +256,8 @@ pub const ShellTool = struct {
         }
 
         // Apply sandbox wrapper if configured
-        const final_argv = if (self.sandbox) |sb| blk: {
-            var wrap_buf: [256][]const u8 = undefined;
-            break :blk try sb.wrapCommand(base_argv, &wrap_buf);
-        } else base_argv;
+        var wrap_buf: [256][]const u8 = undefined;
+        const final_argv = try wrapCommandArgv(self.sandbox, base_argv, &wrap_buf);
 
         // Execute command
         const result = try proc.run(allocator, final_argv, .{
@@ -906,30 +911,76 @@ test "shell path_env_vars passes validated vars to child" {
     try std.testing.expectEqualStrings(libs_path, result.output);
 }
 
-test "shell with sandbox enabled wraps command" {
+const PrefixSandbox = struct {
+    pub const sandbox_vtable = Sandbox.VTable{
+        .wrapCommand = wrapCommand,
+        .isAvailable = isAvailable,
+        .name = getName,
+        .description = getDescription,
+    };
+
+    pub fn sandbox(self: *PrefixSandbox) Sandbox {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &sandbox_vtable,
+        };
+    }
+
+    fn wrapCommand(_: *anyopaque, argv: []const []const u8, buf: [][]const u8) ![]const []const u8 {
+        if (buf.len < argv.len + 1) return error.BufferTooSmall;
+
+        buf[0] = "env";
+        for (argv, 0..) |arg, i| {
+            buf[i + 1] = arg;
+        }
+        return buf[0 .. argv.len + 1];
+    }
+
+    fn isAvailable(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn getName(_: *anyopaque) []const u8 {
+        return "prefix";
+    }
+
+    fn getDescription(_: *anyopaque) []const u8 {
+        return "Test prefix sandbox";
+    }
+};
+
+test "wrapCommandArgv uses caller-owned buffer for sandbox wrappers" {
+    var prefix = PrefixSandbox{};
+    const base_argv = [_][]const u8{ "sh", "-c", "printf test" };
+    var wrap_buf: [8][]const u8 = undefined;
+
+    // Regression: keep wrapper argv storage alive until the child process is spawned.
+    const final_argv = try wrapCommandArgv(@as(?Sandbox, prefix.sandbox()), &base_argv, &wrap_buf);
+    try std.testing.expectEqual(@as(usize, 4), final_argv.len);
+    try std.testing.expectEqualStrings("env", final_argv[0]);
+    try std.testing.expectEqualStrings("sh", final_argv[1]);
+    try std.testing.expectEqualStrings("-c", final_argv[2]);
+    try std.testing.expectEqualStrings("printf test", final_argv[3]);
+}
+
+test "shell with sandbox wrapper executes command" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // Sandboxes not currently available on Windows in tests
 
-    // Create a shell tool with a noop sandbox (simulates active sandbox config)
-    var storage: SandboxStorage = .{};
-    storage.noop = .{};
-    const sandbox = storage.noop.sandbox();
+    var prefix = PrefixSandbox{};
 
     var st = ShellTool{
         .workspace_dir = "/tmp",
-        .sandbox = sandbox,
-        .sandbox_storage = storage,
+        .sandbox = prefix.sandbox(),
     };
     const t = st.tool();
 
-    const parsed = try root.parseTestArgs("{\"command\": \"echo test\"}");
+    const parsed = try root.parseTestArgs("{\"command\": \"printf test\"}");
     defer parsed.deinit();
 
-    // We can't easily test the actual wrapping without mocking process.run,
-    // but we can verify that the sandbox field is set and the tool still executes
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);
 
     try std.testing.expect(result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "test") != null);
+    try std.testing.expectEqualStrings("test", result.output);
 }
