@@ -297,6 +297,14 @@ pub fn buildSystemPrompt(
     // Attachment marker conventions for channel delivery.
     try appendChannelAttachmentsSection(w);
 
+    const channel_is_telegram = if (ctx.conversation_context) |cc|
+        if (cc.channel) |ch| std.ascii.eqlIgnoreCase(ch, "telegram") else false
+    else
+        false;
+    if (channel_is_telegram) {
+        try appendTelegramChoicesSection(w);
+    }
+
     // Conversation context section (Signal-specific for now)
     if (ctx.conversation_context) |cc| {
         try w.writeAll("## Conversation Context\n\n");
@@ -366,8 +374,7 @@ pub fn buildSystemPrompt(
     // Group chat behavior section (Telegram-only for now).
     // The [NO_REPLY] marker is currently suppressed only by the Telegram loop.
     if (ctx.conversation_context) |cc| {
-        const is_telegram = if (cc.channel) |ch| std.ascii.eqlIgnoreCase(ch, "telegram") else false;
-        if (is_telegram and cc.is_group != null and cc.is_group.?) {
+        if (channel_is_telegram and cc.is_group != null and cc.is_group.?) {
             try w.writeAll("## Group Chat Behavior\n\n");
             try w.writeAll("You are in a group chat. Not every message requires a response.\n\n");
             try w.writeAll("Use the `[NO_REPLY]` marker when:\n");
@@ -763,9 +770,11 @@ fn appendChannelAttachmentsSection(w: anytype) !void {
     try w.writeAll("- Image/video/audio/voice: `[IMAGE:/abs/path]`, `[VIDEO:/abs/path]`, `[AUDIO:/abs/path]`, `[VOICE:/abs/path]`\n");
     try w.writeAll("- If user gives `~/...`, expand it to the absolute home path before sending.\n");
     try w.writeAll("- Do not claim attachment sending is unavailable when these markers are supported.\n\n");
+}
 
+fn appendTelegramChoicesSection(w: anytype) !void {
     try w.writeAll("## Channel Choices\n\n");
-    try w.writeAll("- On supported channels (for example Telegram when enabled), append `<nc_choices>...</nc_choices>` at the end of the final reply to render short button choices when you are asking the user to choose among short options.\n");
+    try w.writeAll("- On Telegram when interactive choices are enabled, append `<nc_choices>...</nc_choices>` at the end of the final reply to render short button choices when you are asking the user to choose among short options.\n");
     try w.writeAll("- Always keep the normal visible question text before the choices block.\n");
     try w.writeAll("- One choices block must correspond to one concrete unanswered question.\n");
     try w.writeAll("- Do not ask two or more separate questions in the same message when only one choices block is provided.\n");
@@ -1292,9 +1301,43 @@ test "buildSystemPrompt includes channel attachment marker guidance" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "## Channel Attachments") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "[FILE:/absolute/path/to/file.ext]") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "Do not claim attachment sending is unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## Channel Choices") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "<nc_choices>") == null);
+}
+
+test "buildSystemPrompt includes nc_choices guidance only for telegram" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/tmp/nonexistent",
+        .model_name = "test-model",
+        .tools = &.{},
+        .conversation_context = .{
+            .channel = "telegram",
+            .is_group = false,
+        },
+    });
+    defer allocator.free(prompt);
+
     try std.testing.expect(std.mem.indexOf(u8, prompt, "## Channel Choices") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<nc_choices>") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "One choices block must correspond to one concrete unanswered question.") != null);
+}
+
+test "buildSystemPrompt omits nc_choices guidance for non-telegram channels" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/tmp/nonexistent",
+        .model_name = "test-model",
+        .tools = &.{},
+        .conversation_context = .{
+            .channel = "qq",
+            .is_group = false,
+        },
+    });
+    defer allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## Channel Choices") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "<nc_choices>") == null);
 }
 
 test "buildSystemPrompt omits telegram-only group marker guidance for non-telegram groups" {
