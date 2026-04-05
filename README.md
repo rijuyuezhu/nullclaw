@@ -172,8 +172,14 @@ nullclaw onboard --interactive
 # Chat
 nullclaw agent -m "Hello, nullclaw!"
 
+# Chat with clean CLI output (filters tool markup)
+nullclaw agent --clean -m "Hello, nullclaw!"
+
 # Interactive mode
 nullclaw agent
+
+# Interactive mode with channel-style filtered output
+nullclaw agent --clean
 
 # Start gateway runtime (gateway + all configured channels/accounts + heartbeat + scheduler)
 nullclaw gateway                # default: 127.0.0.1:3000
@@ -770,8 +776,8 @@ See [Gateway API docs](docs/en/gateway-api.md) for full A2A reference including 
 | `onboard --api-key sk-... --provider openrouter` | Quick setup with API key and provider |
 | `onboard --interactive` | Full interactive wizard |
 | `onboard --channels-only` | Reconfigure channels/allowlists only |
-| `agent -m "..."` | Single message mode |
-| `agent` | Interactive chat mode |
+| `agent -m "..." [--clean]` | Single message mode (`--clean` filters tool markup) |
+| `agent [--clean]` | Interactive chat mode (`--clean` uses channel-style filtered output) |
 | `gateway` | Start long-running runtime (default: `127.0.0.1:3000`) |
 | `service install\|start\|stop\|restart\|status\|uninstall` | Manage background service |
 | `doctor` | Diagnose system health |

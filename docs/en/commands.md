@@ -42,14 +42,15 @@ This page groups the NullClaw CLI by task so you can find the right command quic
 | `nullclaw onboard --api-key sk-... --provider openrouter` | Quick provider + API key setup |
 | `nullclaw onboard --api-key ... --provider ... --model ... --memory ...` | Set provider, model, and memory backend in one command |
 | `nullclaw onboard --channels-only` | Reconfigure channels and allowlists only |
-| `nullclaw agent -m "..."` | Run a single prompt |
+| `nullclaw agent -m "..." [--clean]` | Run a single prompt (`--clean` filters tool markup) |
 | `nullclaw agent --workspace /path/to/workspace -m "..."` | Run the agent against a specific workspace for this process |
 | `nullclaw agent --skill news-digest -m "..."` | Run a single prompt with a named skill active |
-| `nullclaw agent` | Start interactive chat mode |
+| `nullclaw agent [--clean]` | Start interactive chat mode (`--clean` uses channel-style filtered output) |
 
 ### Interactive model routing
 
 - In `nullclaw agent`, `/model` shows the current model plus configured routing/fallback status.
+- Add `--clean` when you want CLI output to hide visible tool-control markup and match Telegram/QQ-style filtered replies.
 - `/config reload` hot reloads supported keys from `config.json` (including agent profiles).
 - When auto-routing is configured, `/model` also shows the last auto-route decision and why it was chosen.
 - If a routed provider is temporarily rate-limited or out of credits, `/model` shows that route as degraded until its cooldown expires.

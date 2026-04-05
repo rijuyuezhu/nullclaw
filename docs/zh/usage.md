@@ -22,6 +22,8 @@ nullclaw onboard --interactive
 nullclaw agent -m "你好，nullclaw"
 ```
 
+如果你希望 CLI 输出更接近 Telegram/QQ 的最终用户视图，可加上 `--clean`，这样会隐藏流式里的 tool 控制块并关闭中间 `stdout` 输出。
+
 3. 启动长期运行网关：
 
 ```bash
@@ -35,8 +37,8 @@ nullclaw gateway
 | `nullclaw onboard --api-key sk-... --provider openrouter` | 快速写入 provider 与 API Key |
 | `nullclaw onboard --interactive` | 交互式完整初始化 |
 | `nullclaw onboard --channels-only` | 只重配 channel / allowlist |
-| `nullclaw agent -m "..."` | 单条消息模式 |
-| `nullclaw agent` | 交互会话模式 |
+| `nullclaw agent -m "..." [--clean]` | 单条消息模式（`--clean` 会过滤 tool 标记） |
+| `nullclaw agent [--clean]` | 交互会话模式（`--clean` 使用更接近 channel 的过滤输出） |
 | `nullclaw gateway` | 启动长期运行 runtime（默认 `127.0.0.1:3000`） |
 | `nullclaw service install` | 安装后台服务 |
 | `nullclaw service start` | 启动后台服务 |

@@ -87,7 +87,7 @@ const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
     \\
     \\OPTIONS:
     \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--model MODEL] [--memory MEM]
-    \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP] [--workspace PATH] [--skill SKILL]
+    \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP] [--workspace PATH] [--skill SKILL] [--clean]
     \\  gateway [--port PORT] [--host HOST] [--workspace PATH]
     \\  status [--json]
     \\  version | --version | -V
@@ -389,6 +389,7 @@ fn printAgentUsage() void {
         \\  --temperature TEMP            Override sampling temperature
         \\  --workspace PATH              Override workspace directory
         \\  --skill SKILL                 Activate a named skill at startup
+        \\  --clean                       Suppress streamed/intermediate stdout; print only the final reply
         \\  --verbose, -v                 Enable verbose logging
         \\  --help, -h                    Show this help
         \\

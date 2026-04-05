@@ -106,6 +106,8 @@ nullclaw onboard --interactive
 nullclaw agent -m "hello nullclaw"
 ```
 
+Add `--clean` if you prefer channel-style filtered CLI output.
+
 If you are not installing via Homebrew, start with [Installation](./installation.md) for container and source paths.
 
 ## Specialized Guides

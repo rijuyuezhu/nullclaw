@@ -40,6 +40,7 @@ const CliStreamCtx = struct {
     sink: streaming.Sink,
     emitted_text: bool = false,
     filter: streaming.TagFilter = undefined,
+    suppress_stream_stdout: bool = false,
 };
 
 const CliProviderContext = struct {
@@ -87,6 +88,7 @@ fn printPendingSubagentNotices(
 fn cliStreamSinkCallback(ctx_ptr: *anyopaque, event: streaming.Event) void {
     if (event.stage != .chunk or event.text.len == 0) return;
     const stream_ctx: *CliStreamCtx = @ptrCast(@alignCast(ctx_ptr));
+    if (stream_ctx.suppress_stream_stdout) return;
     stream_ctx.emitted_text = true;
 
     // In tests, stdout is used by Zig's test runner protocol (`--listen`).
@@ -185,6 +187,7 @@ const ParsedAgentArgs = struct {
     workspace_override: ?[]const u8 = null,
     skill_name: ?[]const u8 = null,
     verbose: bool = false,
+    clean_output: bool = false,
 };
 
 const AgentArgParseResult = union(enum) {
@@ -233,6 +236,8 @@ fn parseAgentArgs(args: []const []const u8) AgentArgParseResult {
             parsed.skill_name = args[i];
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             parsed.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--clean")) {
+            parsed.clean_output = true;
         }
     }
     return .{ .ok = parsed };
@@ -534,6 +539,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         agent.session_store = if (mem_rt) |rt| rt.session_store else null;
         agent.response_cache = if (mem_rt) |*rt| rt.response_cache else null;
         agent.mem_rt = if (mem_rt) |*rt| rt else null;
+        agent.suppress_intermediate_stdout = parsed_args.clean_output;
         if (parsed_args.provider_override != null or parsed_args.model_override != null) {
             agent.model_pinned_by_user = true;
         }
@@ -550,6 +556,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         // Enable streaming if provider supports it
         var stream_ctx = CliStreamCtx{
             .sink = undefined,
+            .suppress_stream_stdout = parsed_args.clean_output,
         };
         const raw_stream_sink = streaming.Sink{
             .callback = cliStreamSinkCallback,
@@ -606,7 +613,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         try w.print("Session: {s}\n", .{sid});
     }
     if (supports_streaming) {
-        try w.print("Streaming: enabled\n", .{});
+        if (parsed_args.clean_output) {
+            try w.print("Streaming: enabled (stdout suppressed by --clean)\n", .{});
+        } else {
+            try w.print("Streaming: enabled\n", .{});
+        }
     }
     try w.print("Type your message (Ctrl+D or 'exit' to quit):\n\n", .{});
     try w.flush();
@@ -648,6 +659,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     agent.session_store = if (mem_rt) |rt| rt.session_store else null;
     agent.response_cache = if (mem_rt) |*rt| rt.response_cache else null;
     agent.mem_rt = if (mem_rt) |*rt| rt else null;
+    agent.suppress_intermediate_stdout = parsed_args.clean_output;
     if (parsed_args.provider_override != null or parsed_args.model_override != null) {
         agent.model_pinned_by_user = true;
     }
@@ -664,6 +676,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     // Enable streaming if provider supports it
     var stream_ctx = CliStreamCtx{
         .sink = undefined,
+        .suppress_stream_stdout = parsed_args.clean_output,
     };
     const raw_stream_sink = streaming.Sink{
         .callback = cliStreamSinkCallback,
@@ -961,6 +974,17 @@ test "cliStreamCallback keeps emitted_text false for filtered tool_call-only chu
     try std.testing.expect(shouldPrintTurnResponse(true, ctx.emitted_text));
 }
 
+test "cliStreamSinkCallback suppresses stdout writes in clean mode" {
+    // Regression: --clean should not mark streamed chunks as user-visible output,
+    // or the CLI will suppress the final response after tool execution.
+    var ctx = CliStreamCtx{
+        .sink = undefined,
+        .suppress_stream_stdout = true,
+    };
+    cliStreamSinkCallback(@ptrCast(&ctx), .{ .stage = .chunk, .text = "hello" });
+    try std.testing.expect(!ctx.emitted_text);
+}
+
 test "parseAgentArgs parses provider and model overrides" {
     const args = [_][]const u8{
         "-m",
@@ -980,6 +1004,17 @@ test "parseAgentArgs parses provider and model overrides" {
     try std.testing.expectEqualStrings("ollama", parsed.provider_override.?);
     try std.testing.expectEqualStrings("llama3.2:latest", parsed.model_override.?);
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), parsed.temperature_override.?, 0.000001);
+    try std.testing.expect(!parsed.clean_output);
+}
+
+test "parseAgentArgs parses clean output flag" {
+    const args = [_][]const u8{ "--clean", "-m", "hello" };
+    const parsed = switch (parseAgentArgs(&args)) {
+        .ok => |value| value,
+        else => unreachable,
+    };
+    try std.testing.expect(parsed.clean_output);
+    try std.testing.expectEqualStrings("hello", parsed.message_arg.?);
 }
 
 test "activeCliProvider uses returned holder storage for named agents" {

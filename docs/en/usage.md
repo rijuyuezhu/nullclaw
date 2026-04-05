@@ -36,6 +36,8 @@ nullclaw onboard --interactive
 nullclaw agent -m "hello nullclaw"
 ```
 
+Add `--clean` if you want the CLI to hide streamed tool-control blocks and match Telegram/QQ-style user-visible output more closely.
+
 3. Start long-running gateway:
 
 ```bash
@@ -49,8 +51,8 @@ nullclaw gateway
 | `nullclaw onboard --api-key sk-... --provider openrouter` | Quick setup for provider and API key |
 | `nullclaw onboard --interactive` | Full interactive setup |
 | `nullclaw onboard --channels-only` | Reconfigure channels and allowlists only |
-| `nullclaw agent -m "..."` | Single-message mode |
-| `nullclaw agent` | Interactive mode |
+| `nullclaw agent -m "..." [--clean]` | Single-message mode (`--clean` filters tool markup) |
+| `nullclaw agent [--clean]` | Interactive mode (`--clean` uses channel-style filtered output) |
 | `nullclaw gateway` | Start long-running runtime (default `127.0.0.1:3000`) |
 | `nullclaw service install` | Install background service |
 | `nullclaw service start` | Start background service |

@@ -343,6 +343,9 @@ pub const Agent = struct {
     message_timeout_secs: u64 = 0,
     log_tool_calls: bool = false,
     log_llm_io: bool = false,
+    /// Suppress direct intermediary stdout writes during tool loops.
+    /// Used by clean CLI rendering to match channel-style output.
+    suppress_intermediate_stdout: bool = false,
     compaction_keep_recent: u32 = compaction.DEFAULT_COMPACTION_KEEP_RECENT,
     compaction_max_summary_chars: u32 = compaction.DEFAULT_COMPACTION_MAX_SUMMARY_CHARS,
     compaction_max_source_chars: u32 = compaction.DEFAULT_COMPACTION_MAX_SOURCE_CHARS,
@@ -862,6 +865,18 @@ pub const Agent = struct {
         // never show the raw payload to the user.
         if (dispatcher.containsToolCallMarkup(response_text)) return "";
         return response_text;
+    }
+
+    fn shouldPrintIntermediateStdout(
+        display_text_len: usize,
+        parsed_calls_len: usize,
+        is_streaming: bool,
+        suppress_intermediate_stdout: bool,
+    ) bool {
+        return display_text_len > 0 and
+            parsed_calls_len > 0 and
+            !is_streaming and
+            !suppress_intermediate_stdout;
     }
 
     fn shouldForceActionFollowThrough(text: []const u8) bool {
@@ -2484,7 +2499,12 @@ pub const Agent = struct {
             // There are tool calls — print intermediary text.
             // In tests, stdout is used by Zig's test runner protocol (`--listen`),
             // so avoid writing arbitrary text that can corrupt the control channel.
-            if (!builtin.is_test and display_text.len > 0 and parsed_calls.len > 0 and !is_streaming) {
+            if (!builtin.is_test and shouldPrintIntermediateStdout(
+                display_text.len,
+                parsed_calls.len,
+                is_streaming,
+                self.suppress_intermediate_stdout,
+            )) {
                 var out_buf: [4096]u8 = undefined;
                 var bw = std_compat.fs.File.stdout().writer(&out_buf);
                 const w = &bw.interface;
@@ -9238,6 +9258,14 @@ test "Agent selectDisplayText hides malformed tool markup present in parsed text
     const parsed_with_markup = "Some text <tool_call>{\"name\":\"shell\"";
     const selected = Agent.selectDisplayText(parsed_with_markup, parsed_with_markup, 0);
     try std.testing.expectEqualStrings("", selected);
+}
+
+test "Agent shouldPrintIntermediateStdout matches clean cli behavior" {
+    try std.testing.expect(Agent.shouldPrintIntermediateStdout(4, 1, false, false));
+    try std.testing.expect(!Agent.shouldPrintIntermediateStdout(4, 1, false, true));
+    try std.testing.expect(!Agent.shouldPrintIntermediateStdout(4, 1, true, false));
+    try std.testing.expect(!Agent.shouldPrintIntermediateStdout(0, 1, false, false));
+    try std.testing.expect(!Agent.shouldPrintIntermediateStdout(4, 0, false, false));
 }
 
 test "Agent retries empty final response once before succeeding" {
