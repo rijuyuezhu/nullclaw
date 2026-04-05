@@ -132,6 +132,18 @@ zig build -Doptimize=ReleaseSmall
 zig build test --summary all
 ```
 
+如果你想让交互式 `nullclaw agent` 在类 Unix 系统上使用 GNU readline：
+
+```bash
+zig build -Doptimize=ReleaseSmall -Dreadline=true
+```
+
+说明：
+
+- `-Dreadline=true` 需要系统里已经安装 `libreadline` 及其头文件。
+- 启用后，TTY 下的 `nullclaw agent` 会获得更接近 shell 的行编辑、历史记录和方向键导航。
+- 默认构建仍保持无额外依赖的 stdin 按行读取模式。
+
 构建产物：
 
 - `zig-out/bin/nullclaw`

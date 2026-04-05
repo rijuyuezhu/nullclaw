@@ -54,6 +54,7 @@ zig build test --summary all
 ```bash
 zig build -Dchannels=telegram,cli
 zig build -Dengines=base,sqlite
+zig build -Dreadline=true
 zig build -Dtarget=x86_64-linux-musl
 zig build -Dversion=2026.3.1
 ```
@@ -62,6 +63,7 @@ Notes:
 
 - `channels`: limit which channel implementations are compiled in
 - `engines`: limit memory engines in the build
+- `readline`: link GNU readline for interactive `nullclaw agent` editing on Unix-like systems
 - `target`: cross-compile target triple
 - `version`: override the embedded version string (`dev` by default; release workflow injects the git tag)
 

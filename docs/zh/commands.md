@@ -37,6 +37,7 @@
 
 - 在 `nullclaw agent` 里，`/model` 会显示当前模型以及已配置的路由/回退状态。
 - 如果你希望 CLI 输出隐藏可见的 tool 控制标记，并更接近 Telegram/QQ 的过滤后回复，可加 `--clean`。
+- 如果二进制是用 `-Dreadline=true` 构建的，TTY 下的 `nullclaw agent` 会使用 GNU readline，提供更接近 shell 的行编辑、历史记录和方向键导航。
 - `/config reload` 会热重载 `config.json` 中支持的配置项（包括 Agent Profile 的更新）。
 - 如果配置了自动路由，`/model` 还会显示最近一次自动路由决策以及选择原因。
 - 如果某条自动路由命中的提供方暂时被限流或额度耗尽，`/model` 会把这条路线标成 degraded，直到冷却结束。
