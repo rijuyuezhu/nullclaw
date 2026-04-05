@@ -29,7 +29,9 @@ pub const lancedb = if (build_options.enable_memory_lancedb) @import("engines/la
 };
 pub const api = @import("engines/api.zig");
 pub const clickhouse = @import("engines/clickhouse.zig");
-pub const kg = @import("engines/kg.zig");
+pub const kg = if (build_options.enable_memory_kg) @import("engines/kg.zig") else struct {
+    pub const KgMemory = struct {};
+};
 pub const registry = @import("engines/registry.zig");
 
 // retrieval/ (Layer B: Retrieval Engine)

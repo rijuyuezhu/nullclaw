@@ -14,7 +14,7 @@ const redis_engine = @import("redis.zig");
 const lancedb_engine = @import("lancedb.zig");
 const api_engine = @import("api.zig");
 const clickhouse_engine = @import("clickhouse.zig");
-const kg_engine = @import("kg.zig");
+const kg_engine = if (build_options.enable_memory_kg) @import("kg.zig") else struct {};
 
 // ── Capability & descriptor types ────────────────────────────────
 
@@ -204,7 +204,7 @@ const clickhouse_backends = if (build_options.enable_memory_clickhouse) [_]Backe
     .create = &createClickHouse,
 }} else [0]BackendDescriptor{};
 
-const kg_backend = BackendDescriptor{
+const kg_backends = if (build_options.enable_memory_kg) [_]BackendDescriptor{.{
     .name = "kg",
     .label = "Knowledge Graph — SQLite with entity-relation traversal",
     .auto_save_default = false,
@@ -212,9 +212,7 @@ const kg_backend = BackendDescriptor{
     .needs_db_path = true,
     .needs_workspace = false,
     .create = &createKg,
-};
-
-const kg_backends = if (build_options.enable_memory_kg) [_]BackendDescriptor{kg_backend} else [0]BackendDescriptor{};
+}} else [0]BackendDescriptor{};
 
 pub const all = hybrid_backends ++ markdown_backends ++ api_backends ++ memory_backends ++ none_backends ++ sqlite_backends ++ lucid_backends ++ redis_backends ++ lancedb_backends ++ pg_backends ++ clickhouse_backends ++ kg_backends;
 pub const known_backend_names = [_][]const u8{

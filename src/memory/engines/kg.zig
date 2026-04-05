@@ -153,6 +153,58 @@ pub const KgMemory = struct {
         }
     }
 
+    fn buildFtsQuery(allocator: std.mem.Allocator, query: []const u8) ![]u8 {
+        var fts_query: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer fts_query.deinit(allocator);
+
+        var iter = std.mem.tokenizeAny(u8, query, " \t\n\r");
+        var first = true;
+        while (iter.next()) |word| {
+            if (!first) {
+                try fts_query.appendSlice(allocator, " OR ");
+            }
+            try fts_query.append(allocator, '"');
+            for (word) |ch_byte| {
+                if (ch_byte == '"') {
+                    try fts_query.appendSlice(allocator, "\"\"");
+                } else {
+                    try fts_query.append(allocator, ch_byte);
+                }
+            }
+            try fts_query.append(allocator, '"');
+            first = false;
+        }
+
+        return fts_query.toOwnedSlice(allocator);
+    }
+
+    fn deleteEntityFts(self: *Self, id: []const u8) !void {
+        const sql = "DELETE FROM kg_entities_fts WHERE id = ?1";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) return error.StepFailed;
+    }
+
+    fn refreshEntityFts(self: *Self, id: []const u8, content: []const u8) !void {
+        try self.deleteEntityFts(id);
+
+        const sql = "INSERT INTO kg_entities_fts (id, content) VALUES (?1, ?2)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, content.ptr, @intCast(content.len), SQLITE_STATIC);
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) return error.StepFailed;
+    }
+
     // ── Graph operations ──────────────────────────────────────────────
 
     fn storeEntity(self: *Self, id: []const u8, entity_type: []const u8, content: []const u8) !void {
@@ -174,17 +226,7 @@ pub const KgMemory = struct {
         rc = c.sqlite3_step(stmt);
         if (rc != c.SQLITE_DONE) return error.StepFailed;
 
-        // Insert into FTS table directly (app is sole writer)
-        {
-            const fts_sql = "INSERT OR REPLACE INTO kg_entities_fts (id, content) VALUES (?1, ?2)";
-            var fts_stmt: ?*c.sqlite3_stmt = null;
-            if (c.sqlite3_prepare_v2(self.db, fts_sql, -1, &fts_stmt, null) == c.SQLITE_OK) {
-                defer _ = c.sqlite3_finalize(fts_stmt);
-                _ = c.sqlite3_bind_text(fts_stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
-                _ = c.sqlite3_bind_text(fts_stmt, 2, content.ptr, @intCast(content.len), SQLITE_STATIC);
-                _ = c.sqlite3_step(fts_stmt);
-            }
-        }
+        try self.refreshEntityFts(id, content);
     }
 
     fn storeRelation(self: *Self, id: []const u8, subject_id: []const u8, predicate: []const u8, object_id: []const u8) !void {
@@ -307,7 +349,7 @@ pub const KgMemory = struct {
     }
 
     /// All relations (incoming + outgoing) for an entity.
-    fn getRelations(self: *Self, allocator: std.mem.Allocator, entity_id: []const u8) ![]MemoryEntry {
+    fn getRelations(self: *Self, allocator: std.mem.Allocator, entity_id: []const u8, limit: usize) ![]MemoryEntry {
         var entries: std.ArrayListUnmanaged(MemoryEntry) = .empty;
         errdefer {
             for (entries.items) |*entry| entry.deinit(allocator);
@@ -319,6 +361,7 @@ pub const KgMemory = struct {
             \\FROM kg_relations r
             \\WHERE r.subject_id = ?1 OR r.object_id = ?1
             \\ORDER BY r.created_at DESC
+            \\LIMIT ?2
         ;
 
         var stmt: ?*c.sqlite3_stmt = null;
@@ -326,6 +369,7 @@ pub const KgMemory = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         _ = c.sqlite3_bind_text(stmt, 1, entity_id.ptr, @intCast(entity_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(effectiveLimit(limit)));
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             try entries.append(allocator, try self.readRelationFromRow(stmt.?, allocator));
@@ -352,6 +396,11 @@ pub const KgMemory = struct {
 
     /// FTS5 search on entity content.
     fn ftsSearch(self: *Self, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]MemoryEntry {
+        const fts_query = try buildFtsQuery(allocator, query);
+        defer allocator.free(fts_query);
+
+        if (fts_query.len == 0) return allocator.alloc(MemoryEntry, 0);
+
         var entries: std.ArrayListUnmanaged(MemoryEntry) = .empty;
         errdefer {
             for (entries.items) |*entry| entry.deinit(allocator);
@@ -371,8 +420,8 @@ pub const KgMemory = struct {
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
         defer _ = c.sqlite3_finalize(stmt);
 
-        _ = c.sqlite3_bind_text(stmt, 1, query.ptr, @intCast(query.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(limit));
+        _ = c.sqlite3_bind_text(stmt, 1, fts_query.ptr, @intCast(fts_query.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(effectiveLimit(limit)));
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const entry = try self.readEntityFromRow(stmt.?, allocator);
@@ -521,7 +570,7 @@ pub const KgMemory = struct {
         if (std.mem.startsWith(u8, trimmed, RELATIONS_QUERY_PREFIX)) {
             const entity_id = trimmed[RELATIONS_QUERY_PREFIX.len..];
             if (entity_id.len == 0) return allocator.alloc(MemoryEntry, 0);
-            return self_.getRelations(allocator, entity_id);
+            return self_.getRelations(allocator, entity_id, limit);
         }
 
         // Fall back to FTS5 content search
@@ -593,13 +642,7 @@ pub const KgMemory = struct {
             rc = c.sqlite3_step(stmt);
             if (rc != c.SQLITE_DONE) return error.StepFailed;
             if (c.sqlite3_changes(self_.db) > 0) {
-                // Also delete from FTS
-                var fts_stmt: ?*c.sqlite3_stmt = null;
-                if (c.sqlite3_prepare_v2(self_.db, "DELETE FROM kg_entities_fts WHERE id = ?1", -1, &fts_stmt, null) == c.SQLITE_OK) {
-                    defer _ = c.sqlite3_finalize(fts_stmt);
-                    _ = c.sqlite3_bind_text(fts_stmt, 1, entity_id.ptr, @intCast(entity_id.len), SQLITE_STATIC);
-                    _ = c.sqlite3_step(fts_stmt);
-                }
+                try self_.deleteEntityFts(entity_id);
                 return true;
             }
         }
@@ -795,4 +838,40 @@ test "kg relations round-trip through get and forget" {
     try std.testing.expect(try m.forget(relation_key));
     const missing = try m.get(std.testing.allocator, relation_key);
     try std.testing.expect(missing == null);
+}
+
+test "kg updating entity refreshes FTS rows" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: FTS rows must be replaced on update instead of accumulating stale matches.
+    try m.store("__kg:entity:e1", "oldterm content", .core, null);
+    try m.store("__kg:entity:e1", "newterm content", .core, null);
+
+    const old_results = try m.recall(std.testing.allocator, "oldterm", 10, null);
+    defer root.freeEntries(std.testing.allocator, old_results);
+    try std.testing.expectEqual(@as(usize, 0), old_results.len);
+
+    const new_results = try m.recall(std.testing.allocator, "newterm", 10, null);
+    defer root.freeEntries(std.testing.allocator, new_results);
+    try std.testing.expectEqual(@as(usize, 1), new_results.len);
+    try std.testing.expectEqualStrings("e1", new_results[0].key);
+}
+
+test "kg relations recall respects requested limit" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: `kg:relations:` must honor recall limit instead of returning the full edge set.
+    try m.store("__kg:entity:hub", "Hub", .core, null);
+    try m.store("__kg:entity:n1", "Node 1", .core, null);
+    try m.store("__kg:entity:n2", "Node 2", .core, null);
+    try m.store("__kg:rel:hub:links:n1", "", .core, null);
+    try m.store("__kg:rel:hub:links:n2", "", .core, null);
+
+    const results = try m.recall(std.testing.allocator, "kg:relations:hub", 1, null);
+    defer root.freeEntries(std.testing.allocator, results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
 }
