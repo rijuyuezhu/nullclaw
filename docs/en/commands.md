@@ -49,6 +49,7 @@ This page groups the NullClaw CLI by task so you can find the right command quic
 
 - In `nullclaw agent`, `/model` shows the current model plus configured routing/fallback status.
 - Add `--clean` when you want CLI output to hide visible tool-control markup and match Telegram/QQ-style filtered replies.
+- If the binary was built with `-Dreadline=true`, TTY `nullclaw agent` sessions use GNU readline for shell-style editing, history, and arrow-key navigation.
 - `/config reload` hot reloads supported keys from `config.json` (including agent profiles).
 - When auto-routing is configured, `/model` also shows the last auto-route decision and why it was chosen.
 - If a routed provider is temporarily rate-limited or out of credits, `/model` shows that route as degraded until its cooldown expires.

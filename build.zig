@@ -376,6 +376,7 @@ pub fn build(b: *std.Build) void {
     const is_wasi = target.result.os.tag == .wasi;
     const is_static = b.option(bool, "static", "Static build") orelse false;
     const enable_embedded_wasm3 = b.option(bool, "embedded_wasm3", "Embed wasm3 runtime into nullclaw binary (default: true; use -Dembedded_wasm3=false to disable)") orelse true;
+    const enable_readline = b.option(bool, "readline", "Enable GNU readline for interactive CLI editing (default: false; Unix-like only, requires system libreadline)") orelse false;
     const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "dev";
     const channels_raw = b.option(
         []const u8,
@@ -440,6 +441,11 @@ pub fn build(b: *std.Build) void {
         ensureAndroidBuildEnvironment(b);
     }
 
+    if (enable_readline and (is_wasi or target.result.os.tag == .windows)) {
+        std.log.err("-Dreadline=true is only supported on Unix-like targets with GNU readline installed", .{});
+        std.process.exit(1);
+    }
+
     const effective_enable_memory_sqlite = enable_sqlite and enable_memory_sqlite;
     const effective_enable_memory_lucid = enable_sqlite and enable_memory_lucid;
     const effective_enable_memory_lancedb = enable_sqlite and enable_memory_lancedb;
@@ -498,6 +504,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_channel_web", enable_channel_web);
     build_options.addOption(bool, "enable_channel_max", enable_channel_max);
     build_options.addOption(bool, "enable_embedded_wasm3", enable_embedded_wasm3);
+    build_options.addOption(bool, "enable_readline", enable_readline);
     const build_options_module = build_options.createModule();
     const compat_module = b.createModule(.{
         .root_source_file = b.path("src/compat.zig"),
@@ -519,6 +526,9 @@ pub fn build(b: *std.Build) void {
         }
         if (enable_postgres) {
             module.linkSystemLibrary("pq", .{});
+        }
+        if (enable_readline) {
+            module.linkSystemLibrary("readline", .{});
         }
         if (enable_channel_web) {
             const ws_dep = b.dependency("websocket", .{
@@ -570,6 +580,9 @@ pub fn build(b: *std.Build) void {
         if (enable_postgres) {
             exe.root_module.linkSystemLibrary("pq", .{});
         }
+        if (enable_readline) {
+            exe.root_module.linkSystemLibrary("readline", .{});
+        }
     }
     exe.dead_strip_dylibs = true;
 
@@ -612,6 +625,10 @@ pub fn build(b: *std.Build) void {
         }
 
         const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+        if (enable_readline) {
+            lib_tests.root_module.linkSystemLibrary("readline", .{});
+            exe_tests.root_module.linkSystemLibrary("readline", .{});
+        }
         test_step.dependOn(&b.addRunArtifact(lib_tests).step);
         test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     }

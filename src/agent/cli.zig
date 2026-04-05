@@ -29,6 +29,7 @@ const inbound_debounce = @import("../inbound_debounce.zig");
 const security = @import("../security/policy.zig");
 const codex_support = @import("../codex_support.zig");
 const onboard = @import("../onboard.zig");
+const readline_support = @import("../readline_support.zig");
 const streaming = @import("../streaming.zig");
 const verbose = @import("../verbose.zig");
 
@@ -652,9 +653,16 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     const stdin = std_compat.fs.File.stdin();
+    const use_readline = shouldUseReadlineInput(readline_support.isAvailable(), stdin.isTty());
     var line_buf: [4096]u8 = undefined;
     var pending_line: ?[]u8 = null;
     defer if (pending_line) |line| allocator.free(line);
+
+    if (use_readline) {
+        for (repl_history.items) |entry| {
+            readline_support.addHistory(allocator, entry) catch {};
+        }
+    }
 
     while (true) {
         var owned_line: ?[]u8 = null;
@@ -665,6 +673,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 pending_line = null;
                 owned_line = queued;
                 break :blk queued;
+            }
+
+            if (use_readline) {
+                owned_line = (try readline_support.readLine(allocator, "> ")) orelse return;
+                break :blk owned_line.?;
             }
 
             try w.print("> ", .{});
@@ -693,6 +706,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         // Append the effective turn input after debounce coalescing.
         repl_history.append(allocator, allocator.dupe(u8, debounced_input.current) catch continue) catch {};
+        if (use_readline) {
+            readline_support.addHistory(allocator, debounced_input.current) catch {};
+        }
 
         stream_ctx.emitted_text = false;
         const response = agent.turn(debounced_input.current) catch |err| {
@@ -797,6 +813,10 @@ fn readCliLine(stdin: std_compat.fs.File, buf: []u8) ?[]const u8 {
     return buf[0..pos];
 }
 
+fn shouldUseReadlineInput(readline_available: bool, stdin_is_tty: bool) bool {
+    return readline_available and stdin_is_tty;
+}
+
 const CliDebouncedInput = struct {
     current: []u8,
     queued_next: ?[]u8 = null,
@@ -866,6 +886,13 @@ test "buildCliDebouncedInput preserves queued bypass command" {
     try std.testing.expectEqualStrings("hello", input.current);
     try std.testing.expect(input.queued_next != null);
     try std.testing.expectEqualStrings("/quit", input.queued_next.?);
+}
+
+test "shouldUseReadlineInput requires tty and readline availability" {
+    try std.testing.expect(shouldUseReadlineInput(true, true));
+    try std.testing.expect(!shouldUseReadlineInput(true, false));
+    try std.testing.expect(!shouldUseReadlineInput(false, true));
+    try std.testing.expect(!shouldUseReadlineInput(false, false));
 }
 
 test "cliStreamCallback text delta chunk" {

@@ -40,6 +40,7 @@ zig build test --summary all
 ```bash
 zig build -Dchannels=telegram,cli
 zig build -Dengines=base,sqlite
+zig build -Dreadline=true
 zig build -Dtarget=x86_64-linux-musl
 zig build -Dversion=2026.3.1
 ```
@@ -48,6 +49,7 @@ zig build -Dversion=2026.3.1
 
 - `channels`：裁剪编译进制中的渠道实现。
 - `engines`：裁剪 memory engine。
+- `readline`：在类 Unix 系统上为交互式 `nullclaw agent` 链接 GNU readline。
 - `target`：交叉编译目标。
 - `version`：覆盖嵌入版本字符串（默认是 `dev`；release workflow 会注入 git tag）。
 

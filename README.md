@@ -129,6 +129,15 @@ zig build -Doptimize=ReleaseSmall
 zig build test --summary all
 ```
 
+Optional interactive CLI editing on Unix-like systems:
+
+```bash
+zig build -Doptimize=ReleaseSmall -Dreadline=true
+```
+
+- `-Dreadline=true` links GNU readline and gives `nullclaw agent` line editing, history, and arrow-key navigation in TTY sessions.
+- Default builds keep the dependency-free stdin line reader.
+
 Make `nullclaw` available on `PATH`:
 
 macOS/Linux (zsh/bash):
@@ -207,6 +216,8 @@ nullclaw service status
 nullclaw migrate openclaw --dry-run
 nullclaw migrate openclaw
 ```
+
+If you built with `-Dreadline=true` on a Unix-like host with GNU readline installed, interactive `nullclaw agent` sessions also get shell-style line editing, history, and arrow-key navigation.
 
 ## Edge MVP (Hybrid Host + WASM Logic)
 

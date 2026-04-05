@@ -136,6 +136,18 @@ zig build -Doptimize=ReleaseSmall
 zig build test --summary all
 ```
 
+Optional GNU readline support for interactive `nullclaw agent` sessions on Unix-like systems:
+
+```bash
+zig build -Doptimize=ReleaseSmall -Dreadline=true
+```
+
+Notes:
+
+- `-Dreadline=true` requires a system `libreadline` with headers available at build time.
+- When enabled, TTY `nullclaw agent` sessions get shell-style line editing, history, and arrow-key navigation.
+- Default builds keep the dependency-free stdin line reader.
+
 Build output:
 
 - `zig-out/bin/nullclaw`
