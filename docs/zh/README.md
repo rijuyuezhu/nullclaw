@@ -106,6 +106,8 @@ nullclaw onboard --interactive
 nullclaw agent -m "你好，nullclaw"
 ```
 
+如果你希望 CLI 输出更接近 channel 里的最终可见回复，可以加上 `--clean`。
+
 如果你不用 Homebrew，请按 [安装指南](./installation.md) 走源码或容器流程。
 
 ## 推荐阅读顺序

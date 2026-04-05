@@ -28,12 +28,13 @@
 | `nullclaw onboard --api-key sk-... --provider openrouter` | 快速写入 provider 与 API Key |
 | `nullclaw onboard --api-key ... --provider ... --model ... --memory ...` | 一次性指定 provider、model、memory backend |
 | `nullclaw onboard --channels-only` | 只重配 channel / allowlist |
-| `nullclaw agent -m "..."` | 单条消息模式 |
-| `nullclaw agent` | 交互会话模式 |
+| `nullclaw agent -m "..." [--clean]` | 单条消息模式（`--clean` 会过滤 tool 标记） |
+| `nullclaw agent [--clean]` | 交互会话模式（`--clean` 使用更接近 channel 的过滤输出） |
 
 ### 交互式模型路由
 
 - 在 `nullclaw agent` 里，`/model` 会显示当前模型以及已配置的路由/回退状态。
+- 如果你希望 CLI 输出隐藏可见的 tool 控制标记，并更接近 Telegram/QQ 的过滤后回复，可加 `--clean`。
 - `/config reload` 会热重载 `config.json` 中支持的配置项（包括 Agent Profile 的更新）。
 - 如果配置了自动路由，`/model` 还会显示最近一次自动路由决策以及选择原因。
 - 如果某条自动路由命中的提供方暂时被限流或额度耗尽，`/model` 会把这条路线标成 degraded，直到冷却结束。
