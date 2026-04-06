@@ -20,9 +20,9 @@ threadlocal var tls_schedule_thread_id: ?[]const u8 = null;
 /// Delegates to the CronScheduler from the cron module for persistent job management.
 pub const ScheduleTool = struct {
     pub const tool_name = "schedule";
-    pub const tool_description = "Manage scheduled tasks. Actions: create/add/once/list/get/cancel/remove/pause/resume. Use 'command' for shell jobs or 'prompt' (with optional 'model') for agent jobs. Optional delivery params: channel, account_id, chat_id. Set session_target to 'main' for agent jobs to route results through the main agent.";
+    pub const tool_description = "Manage scheduled tasks. Actions: create/add/once/list/get/cancel/remove/pause/resume. Use 'command' for shell jobs or 'prompt' (with optional 'model') for agent jobs. Scheduled agent jobs default to isolated for reminders, notifications, and direct channel delivery. Optional delivery params: channel, account_id, chat_id. Set session_target to 'main' for opt-in post-processing through the main agent.";
     pub const tool_params =
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["create","add","once","list","get","cancel","remove","pause","resume"],"description":"Action to perform"},"expression":{"type":"string","description":"Cron expression for recurring tasks"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"prompt":{"type":"string","description":"Agent prompt for an agent job"},"model":{"type":"string","description":"Optional model override for agent jobs"},"id":{"type":"string","description":"Task ID"},"channel":{"type":"string","description":"Delivery channel for notifications (e.g. telegram, signal, matrix)"},"account_id":{"type":"string","description":"Optional channel account ID for multi-account routing"},"chat_id":{"type":"string","description":"Chat ID for delivery notification"},"session_target":{"type":"string","enum":["isolated","main"],"description":"Routing mode for agent jobs: 'isolated' (default) delivers raw output directly; 'main' routes through the main agent session for contextualised responses"}},"required":["action"]}
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["create","add","once","list","get","cancel","remove","pause","resume"],"description":"Action to perform"},"expression":{"type":"string","description":"Cron expression for recurring tasks"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"prompt":{"type":"string","description":"Agent prompt for an agent job"},"model":{"type":"string","description":"Optional model override for agent jobs"},"id":{"type":"string","description":"Task ID"},"channel":{"type":"string","description":"Delivery channel for notifications (e.g. telegram, signal, matrix)"},"account_id":{"type":"string","description":"Optional channel account ID for multi-account routing"},"chat_id":{"type":"string","description":"Chat ID for delivery notification"},"session_target":{"type":"string","enum":["isolated","main"],"description":"Routing mode for agent jobs: 'isolated' (default) delivers output directly for reminders, notifications, and direct channel delivery; 'main' opt-in routes through the main agent for post-processing"}},"required":["action"]}
     ;
 
     const vtable = root.ToolVTable(@This());
@@ -497,6 +497,25 @@ test "schedule schema has action" {
     const t = st.tool();
     const schema = t.parametersJson();
     try std.testing.expect(std.mem.indexOf(u8, schema, "action") != null);
+}
+
+test "schedule description documents isolated default for direct delivery" {
+    var st = ScheduleTool{};
+    const t = st.tool();
+    const description = t.description();
+    try std.testing.expect(std.mem.indexOf(u8, description, "default to isolated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, description, "reminders, notifications, and direct channel delivery") != null);
+    try std.testing.expect(std.mem.indexOf(u8, description, "main") != null);
+    try std.testing.expect(std.mem.indexOf(u8, description, "post-processing") != null);
+}
+
+test "schedule schema documents session target default and opt-in main mode" {
+    var st = ScheduleTool{};
+    const t = st.tool();
+    const schema = t.parametersJson();
+    try std.testing.expect(std.mem.indexOf(u8, schema, "'isolated' (default) delivers output directly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "reminders, notifications, and direct channel delivery") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "'main' opt-in routes through the main agent") != null);
 }
 
 test "schedule list returns success" {
