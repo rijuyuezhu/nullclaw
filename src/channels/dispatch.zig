@@ -231,8 +231,10 @@ fn classifyOutboundFailure(err: anyerror) DeliveryFailureClass {
     };
 }
 
-fn shouldRetryOutboundMessage(msg: bus.OutboundMessage, err: anyerror) bool {
-    return msg.stage == .final and classifyOutboundFailure(err) == .transient;
+fn shouldRetryOutboundMessage(channel: root.Channel, msg: bus.OutboundMessage, err: anyerror) bool {
+    return msg.stage == .final and
+        !shouldUseTrackedDraftDispatch(channel, msg) and
+        classifyOutboundFailure(err) == .transient;
 }
 
 fn dispatchOutboundMessageWithRetry(
@@ -244,7 +246,7 @@ fn dispatchOutboundMessageWithRetry(
     var attempt: usize = 1;
     while (true) {
         dispatchOutboundMessage(allocator, channel, msg, draft_messages) catch |err| {
-            if (!shouldRetryOutboundMessage(msg, err) or attempt >= MAX_FINAL_SEND_ATTEMPTS) return err;
+            if (!shouldRetryOutboundMessage(channel, msg, err) or attempt >= MAX_FINAL_SEND_ATTEMPTS) return err;
             const backoff_idx = @min(attempt - 1, FINAL_SEND_RETRY_BACKOFF_MS.len - 1);
             const backoff_ms = FINAL_SEND_RETRY_BACKOFF_MS[backoff_idx];
             if (backoff_ms > 0) std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
@@ -259,6 +261,12 @@ fn deinitDraftMessages(allocator: Allocator, draft_messages: *DraftMessageMap) v
     var it = draft_messages.valueIterator();
     while (it.next()) |state| state.deinit(allocator);
     draft_messages.deinit(allocator);
+}
+
+fn shouldUseTrackedDraftDispatch(channel: root.Channel, msg: bus.OutboundMessage) bool {
+    return msg.draft_id != 0 and
+        !channel.supportsStreamingOutbound() and
+        supportsDraftStreaming(channel);
 }
 
 fn draftMessageKey(allocator: Allocator, msg: bus.OutboundMessage) ![]u8 {
@@ -305,10 +313,7 @@ fn dispatchOutboundMessage(
     msg: bus.OutboundMessage,
     draft_messages: *DraftMessageMap,
 ) !void {
-    if (msg.draft_id != 0 and
-        !channel.supportsStreamingOutbound() and
-        supportsDraftStreaming(channel))
-    {
+    if (shouldUseTrackedDraftDispatch(channel, msg)) {
         switch (msg.stage) {
             .chunk => return dispatchDraftChunk(allocator, channel, msg, draft_messages),
             .final => {
@@ -670,10 +675,12 @@ const MockDraftChannel = struct {
     allocator: Allocator,
     name_str: []const u8,
     supports_drafts: bool = true,
+    fail_first_delete: bool = false,
     sent_count: Atomic(u64) = Atomic(u64).init(0),
     tracked_count: Atomic(u64) = Atomic(u64).init(0),
     edit_count: Atomic(u64) = Atomic(u64).init(0),
     delete_count: Atomic(u64) = Atomic(u64).init(0),
+    delete_attempts: Atomic(u64) = Atomic(u64).init(0),
     last_tracked_text: ?[]u8 = null,
     last_edit_text: ?[]u8 = null,
 
@@ -726,6 +733,8 @@ const MockDraftChannel = struct {
     }
     fn mockDeleteMessage(ctx: *anyopaque, _: root.Channel.MessageRef) anyerror!void {
         const self: *MockDraftChannel = @ptrCast(@alignCast(ctx));
+        const attempt = self.delete_attempts.fetchAdd(1, .monotonic) + 1;
+        if (self.fail_first_delete and attempt == 1) return error.SendFailed;
         _ = self.delete_count.fetchAdd(1, .monotonic);
     }
     fn mockName(ctx: *anyopaque) []const u8 {
@@ -971,6 +980,43 @@ test "dispatcher deletes tracked draft on empty final" {
     try std.testing.expectEqual(@as(u64, 1), mock_external.tracked_count.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 0), mock_external.edit_count.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), mock_external.delete_count.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), mock_external.sent_count.load(.monotonic));
+}
+
+// Regression: retry logic must not turn a failed tracked-draft delete into a fresh outbound send.
+test "dispatcher does not retry tracked draft final delete failures" {
+    const allocator = std.testing.allocator;
+
+    var mock_external = MockDraftChannel{
+        .allocator = allocator,
+        .name_str = "external",
+        .fail_first_delete = true,
+    };
+    defer mock_external.deinit();
+
+    var reg = ChannelRegistry.init(allocator);
+    defer reg.deinit();
+    try reg.register(mock_external.channel());
+
+    var event_bus = bus.Bus.init();
+    var stats = DispatchStats{};
+
+    var chunk = try bus.makeOutboundChunk(allocator, "external", "chat1", "Hello");
+    chunk.draft_id = 22;
+    try event_bus.publishOutbound(chunk);
+
+    var final = try bus.makeOutbound(allocator, "external", "chat1", "");
+    final.draft_id = 22;
+    try event_bus.publishOutbound(final);
+    event_bus.close();
+
+    runOutboundDispatcher(allocator, &event_bus, &reg, &stats);
+
+    try std.testing.expectEqual(@as(u64, 1), stats.getDispatched());
+    try std.testing.expectEqual(@as(u64, 1), stats.getErrors());
+    try std.testing.expectEqual(@as(u64, 1), mock_external.tracked_count.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), mock_external.delete_attempts.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), mock_external.delete_count.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 0), mock_external.sent_count.load(.monotonic));
 }
 
