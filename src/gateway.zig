@@ -710,6 +710,25 @@ pub fn isWebhookAuthorized(pairing_guard: ?*const PairingGuard, bearer_token: ?[
     return guard.isAuthenticated(token);
 }
 
+/// Returns true when a generic gateway endpoint (/webhook, /cron, /a2a) should
+/// be accepted for the current bind exposure and bearer token. Public binds
+/// always require a valid stored bearer token, even when interactive pairing is
+/// disabled, so generic endpoints cannot silently become anonymous Internet
+/// entrypoints.
+pub fn isGenericGatewayEndpointAuthorized(
+    pairing_guard: ?*const PairingGuard,
+    bearer_token: ?[]const u8,
+    public_bind: bool,
+) bool {
+    if (!public_bind) return isWebhookAuthorized(pairing_guard, bearer_token);
+
+    const guard = pairing_guard orelse return false;
+    const token = bearer_token orelse return false;
+    if (guard.requirePairing()) return guard.isAuthenticated(token);
+    if (!guard.hasPairedTokens()) return false;
+    return guard.matchesStoredToken(token);
+}
+
 /// Format the /pair success payload. Returns null when buffer is too small.
 pub fn formatPairSuccessResponse(buf: []u8, token: []const u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{{\"status\":\"paired\",\"token\":\"{s}\"}}", .{token}) catch null;
@@ -5046,6 +5065,7 @@ pub fn run(
     const max_body = if (config_opt) |cfg| cfg.gateway.max_body_size_bytes else MAX_BODY_SIZE;
     const request_timeout_secs = effectiveRequestReadTimeoutSecs(config_opt);
     try ensureSafeGatewayBind(host, config_opt, tunnel_url_opt);
+    const public_bind = isPublicBindHost(host);
 
     // Provider runtime bundle (primary + reliability wrapper) must outlive the accept loop.
     var provider_bundle_opt: ?providers.runtime_bundle.RuntimeProviderBundle = null;
@@ -5347,7 +5367,7 @@ pub fn run(
                 else if (!g.hasPairedTokens())
                     false // bootstrap phase: deny, CLI falls back to disk
                 else
-                    isWebhookAuthorized(pairing_guard, bearer)
+                    isGenericGatewayEndpointAuthorized(pairing_guard, bearer, public_bind)
             else
                 true;
             if (!cron_authorized) {
@@ -5433,7 +5453,7 @@ pub fn run(
                 const auth_header = extractHeader(raw, "Authorization");
                 const bearer = if (auth_header) |ah| extractBearerToken(ah) else null;
                 const pairing_guard = if (state.pairing_guard) |*guard| guard else null;
-                if (!isWebhookAuthorized(pairing_guard, bearer)) {
+                if (!isGenericGatewayEndpointAuthorized(pairing_guard, bearer, public_bind)) {
                     response_status = "401 Unauthorized";
                     response_body = "{\"error\":\"unauthorized\"}";
                 } else if (!allowScopedWebhook(&state, "a2a", client_identifier)) {
@@ -5497,7 +5517,7 @@ pub fn run(
                     const auth_header = extractHeader(raw, "Authorization");
                     const bearer = if (auth_header) |ah| extractBearerToken(ah) else null;
                     const pairing_guard = if (state.pairing_guard) |*guard| guard else null;
-                    if (!isWebhookAuthorized(pairing_guard, bearer)) {
+                    if (!isGenericGatewayEndpointAuthorized(pairing_guard, bearer, public_bind)) {
                         response_status = "401 Unauthorized";
                         response_body = "{\"error\":\"unauthorized\"}";
                     } else if (!allowScopedWebhook(&state, "webhook", client_identifier)) {
@@ -5625,6 +5645,30 @@ test "cron auth matrix: pairing disabled allows all" {
     try std.testing.expect(!guard.requirePairing());
     // cron_authorized = !requirePairing() → true
     try std.testing.expect(!guard.requirePairing());
+}
+
+test "generic endpoint auth matrix: loopback allows pairing-disabled local access" {
+    var guard = try PairingGuard.init(std.testing.allocator, false, &.{});
+    defer guard.deinit();
+
+    try std.testing.expect(isGenericGatewayEndpointAuthorized(&guard, null, false));
+}
+
+test "generic endpoint auth matrix: public bind denies pairing-disabled access without stored token" {
+    var guard = try PairingGuard.init(std.testing.allocator, false, &.{});
+    defer guard.deinit();
+
+    try std.testing.expect(!isGenericGatewayEndpointAuthorized(&guard, null, true));
+    try std.testing.expect(!isGenericGatewayEndpointAuthorized(&guard, "anything", true));
+}
+
+test "generic endpoint auth matrix: public bind accepts stored token even when pairing disabled" {
+    const tokens = [_][]const u8{"zc_public_static_token"};
+    var guard = try PairingGuard.init(std.testing.allocator, false, &tokens);
+    defer guard.deinit();
+
+    try std.testing.expect(isGenericGatewayEndpointAuthorized(&guard, "zc_public_static_token", true));
+    try std.testing.expect(!isGenericGatewayEndpointAuthorized(&guard, "wrong", true));
 }
 
 test "cron auth matrix: bootstrap phase denies all" {

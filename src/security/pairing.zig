@@ -133,7 +133,6 @@ pub const PairingGuard = struct {
         return self.paired_tokens.count() > 0;
     }
 
-
     /// Attempt to pair with the given code. Returns a bearer token on success.
     /// Returns error.LockedOut if locked out due to brute force.
     /// Returns null if code is incorrect.
@@ -184,6 +183,12 @@ pub const PairingGuard = struct {
     pub fn isAuthenticated(self: *const PairingGuard, token: []const u8) bool {
         if (!self.require_pairing_flag) return true;
 
+        return self.matchesStoredToken(token);
+    }
+
+    /// Check whether a bearer token matches one of the stored token hashes,
+    /// regardless of whether interactive pairing is enabled.
+    pub fn matchesStoredToken(self: *const PairingGuard, token: []const u8) bool {
         var hash_buf: [64]u8 = undefined;
         const hashed = hashToken(token, &hash_buf);
         // Scan every stored hash so authentication does not leak match position.

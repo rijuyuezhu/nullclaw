@@ -282,8 +282,9 @@ curl -X POST \
 
 1. 保持 `gateway.require_pairing = true`。
 2. 网关优先绑定 `127.0.0.1`，外网访问通过 tunnel/反向代理。
-3. token 视为密钥，不写入公开仓库或日志。
-4. Max webhook secret 同理：每个账号使用独立随机值，不跨 bot 复用。
+3. 如果你刻意绑定到非 loopback 地址，通用端点（`/webhook`、`/cron/*`、`/a2a`）即使关闭了交互式 pairing，也仍然要求已存储的 bearer token；如果不使用 `/pair`，请预先配置 `gateway.paired_tokens`。
+4. token 视为密钥，不写入公开仓库或日志。
+5. Max webhook secret 同理：每个账号使用独立随机值，不跨 bot 复用。
 
 ## 下一步
 

@@ -855,6 +855,7 @@ Recommended defaults:
 - `require_pairing = true`
 
 Avoid direct public exposure. Use tunnel when external access is required.
+On non-loopback binds, generic gateway endpoints such as `/webhook`, `/cron/*`, and `/a2a` still require a stored bearer token even if interactive pairing is disabled, so keep `require_pairing = true` or preconfigure `paired_tokens`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
