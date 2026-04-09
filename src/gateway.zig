@@ -729,6 +729,10 @@ pub fn isGenericGatewayEndpointAuthorized(
     return guard.matchesStoredToken(token);
 }
 
+fn isPairEndpointAllowed(public_bind: bool, client_identifier: []const u8) bool {
+    return !public_bind or !isPublicBindHost(client_identifier);
+}
+
 /// Format the /pair success payload. Returns null when buffer is too small.
 pub fn formatPairSuccessResponse(buf: []u8, token: []const u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{{\"status\":\"paired\",\"token\":\"{s}\"}}", .{token}) catch null;
@@ -5570,6 +5574,9 @@ pub fn run(
                 if (!is_post) {
                     response_status = "405 Method Not Allowed";
                     response_body = "{\"error\":\"method not allowed\"}";
+                } else if (!isPairEndpointAllowed(public_bind, client_identifier)) {
+                    response_status = "403 Forbidden";
+                    response_body = "{\"error\":\"pairing requires loopback client on public bind\"}";
                 } else if (!allowScopedPair(&state, "pair", client_identifier)) {
                     response_status = "429 Too Many Requests";
                     response_body = "{\"error\":\"rate limited\"}";
@@ -5669,6 +5676,18 @@ test "generic endpoint auth matrix: public bind accepts stored token even when p
 
     try std.testing.expect(isGenericGatewayEndpointAuthorized(&guard, "zc_public_static_token", true));
     try std.testing.expect(!isGenericGatewayEndpointAuthorized(&guard, "wrong", true));
+}
+
+test "pair endpoint access matrix: loopback always allowed" {
+    try std.testing.expect(isPairEndpointAllowed(false, "203.0.113.10"));
+    try std.testing.expect(isPairEndpointAllowed(true, "127.0.0.1"));
+    try std.testing.expect(isPairEndpointAllowed(true, "::1"));
+}
+
+test "pair endpoint access matrix: public bind rejects non-loopback clients" {
+    try std.testing.expect(!isPairEndpointAllowed(true, "192.168.1.10"));
+    try std.testing.expect(!isPairEndpointAllowed(true, "203.0.113.10"));
+    try std.testing.expect(!isPairEndpointAllowed(true, "example.com"));
 }
 
 test "cron auth matrix: bootstrap phase denies all" {

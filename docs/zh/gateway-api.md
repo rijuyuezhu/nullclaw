@@ -13,7 +13,7 @@
 | Endpoint | Method | 鉴权 | 说明 |
 |---|---|---|---|
 | `/health` | GET | 无 | 健康检查 |
-| `/pair` | POST | `X-Pairing-Code` | 用一次性配对码换取 bearer token |
+| `/pair` | POST | `X-Pairing-Code` | 用一次性配对码换取 bearer token（网关公开绑定时仅允许 loopback 客户端） |
 | `/webhook` | POST | `Authorization: Bearer <token>` | 发送消息：`{"message":"..."}` |
 | `/cron` | GET | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 查看运行中 daemon 的实时 scheduler 任务 |
 | `/cron/add` | POST | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 新增实时 cron 任务 |
@@ -283,8 +283,9 @@ curl -X POST \
 1. 保持 `gateway.require_pairing = true`。
 2. 网关优先绑定 `127.0.0.1`，外网访问通过 tunnel/反向代理。
 3. 如果你刻意绑定到非 loopback 地址，通用端点（`/webhook`、`/cron/*`、`/a2a`）即使关闭了交互式 pairing，也仍然要求已存储的 bearer token；如果不使用 `/pair`，请预先配置 `gateway.paired_tokens`。
-4. token 视为密钥，不写入公开仓库或日志。
-5. Max webhook secret 同理：每个账号使用独立随机值，不跨 bot 复用。
+4. 如果是非 loopback 绑定，`/pair` 只接受 loopback 客户端；要么先在本机完成初始 pairing，要么在公开端口前预先配置 `gateway.paired_tokens`。
+5. token 视为密钥，不写入公开仓库或日志。
+6. Max webhook secret 同理：每个账号使用独立随机值，不跨 bot 复用。
 
 ## 下一步
 

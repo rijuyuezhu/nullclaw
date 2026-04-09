@@ -27,7 +27,7 @@ Default gateway endpoint: `http://127.0.0.1:3000`
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/health` | GET | None | Health check |
-| `/pair` | POST | `X-Pairing-Code` | Exchange one-time pairing code for bearer token |
+| `/pair` | POST | `X-Pairing-Code` | Exchange one-time pairing code for bearer token (loopback-only when gateway is publicly bound) |
 | `/webhook` | POST | `Authorization: Bearer <token>` | Send message payload: `{"message":"..."}` |
 | `/cron` | GET | `Authorization: Bearer <token>` when pairing tokens exist | List live scheduler jobs from the running daemon |
 | `/cron/add` | POST | `Authorization: Bearer <token>` when pairing tokens exist | Add or schedule a live cron job |
@@ -307,8 +307,9 @@ Include `contextId` in the message to group tasks into a conversation. All messa
 1. Keep `gateway.require_pairing = true`.
 2. Keep gateway on loopback (`127.0.0.1`) and expose externally through tunnel/proxy.
 3. If you intentionally use a non-loopback bind, generic endpoints (`/webhook`, `/cron/*`, `/a2a`) still require a stored bearer token even when interactive pairing is disabled; preconfigure `gateway.paired_tokens` if you are not using `/pair`.
-4. Treat bearer tokens as secrets; do not commit or log them.
-5. Treat Max webhook secrets the same way: randomize them per account and do not reuse one secret across multiple bots.
+4. On non-loopback binds, `/pair` only accepts loopback clients. Do initial pairing locally or preconfigure `gateway.paired_tokens` before exposing the port.
+5. Treat bearer tokens as secrets; do not commit or log them.
+6. Treat Max webhook secrets the same way: randomize them per account and do not reuse one secret across multiple bots.
 
 ## Next Steps
 

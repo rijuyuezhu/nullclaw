@@ -667,6 +667,7 @@ Max 说明：
   - `require_pairing = true`
 - 不建议直接公网监听；如需外网访问，优先使用 tunnel。
 - 如果绑定到非 loopback 地址，像 `/webhook`、`/cron/*`、`/a2a` 这类通用网关端点即使关闭了交互式 pairing，也仍然要求已存储的 bearer token，因此应保持 `require_pairing = true`，或者预先配置 `paired_tokens`。
+- 如果绑定到非 loopback 地址，`/pair` 只接受 loopback 客户端；要么先在本机完成初始 pairing，要么在公开端口前预先配置 `paired_tokens`。
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
