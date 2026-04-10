@@ -65,6 +65,10 @@ pub const OpenRouterProvider = struct {
         }
 
         try buf.append(allocator, ']');
+        if (session_id) |sid| {
+            try buf.appendSlice(allocator, ",\"session_id\":");
+            try root.appendJsonString(&buf, allocator, sid);
+        }
         try root.appendGenerationFields(&buf, allocator, model, temperature, null, null);
         try root.appendOpenAiBodyExtraParams(&buf, allocator, session_id, extra_body_params);
         try buf.append(allocator, '}');
@@ -643,8 +647,15 @@ test "buildRequestBody appends session_id and extra_body_params" {
         "{\"seed\":17}",
     );
     defer std.testing.allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"user\":\"session-123\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"seed\":17") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+
+    // Regression: single-turn OpenRouter requests must keep the provider-native
+    // session_id field in sync with the generic OpenAI-compatible user field.
+    try std.testing.expectEqualStrings("session-123", parsed.value.object.get("session_id").?.string);
+    try std.testing.expectEqualStrings("session-123", parsed.value.object.get("user").?.string);
+    try std.testing.expectEqual(@as(i64, 17), parsed.value.object.get("seed").?.integer);
 }
 
 test "parseTextResponse single choice" {
