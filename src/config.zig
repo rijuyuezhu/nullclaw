@@ -181,7 +181,7 @@ fn namedAgentUsesReservedRootId(agent_name: []const u8) bool {
 
 fn isKnownProviderName(providers: []const ProviderEntry, name: []const u8) bool {
     for (providers) |p| {
-        if (std.mem.eql(u8, p.name, name)) return true;
+        if (provider_names.providerNamesMatch(p.name, name)) return true;
     }
     return false;
 }
@@ -6806,20 +6806,38 @@ test "NostrConfig dm_relays default is auth.nostr1.com" {
     try std.testing.expectEqualStrings("wss://auth.nostr1.com", cfg.dm_relays[0]);
 }
 
-// Regression: named agent provider name not validated against known providers
-test "isKnownProviderName matches registered provider" {
-    const providers = [_]config_types.ProviderEntry{
-        .{ .name = "openai" },
-        .{ .name = "anthropic" },
+// Regression: named agent provider names must resolve through the same alias-aware
+// provider matching used by config lookups.
+test "validation rejects unknown named agent provider when providers are configured" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .providers = &.{.{ .name = "openai" }},
+        .default_model = "gpt-5.4",
+        .agents = &.{.{
+            .name = "worker",
+            .provider = "nonexistent-provider",
+            .model = "gpt-5.4",
+        }},
+        .allocator = std.testing.allocator,
     };
-    try std.testing.expect(isKnownProviderName(&providers, "openai"));
-    try std.testing.expect(isKnownProviderName(&providers, "anthropic"));
-    try std.testing.expect(!isKnownProviderName(&providers, "nonexistent-provider"));
-    try std.testing.expect(!isKnownProviderName(&providers, ""));
-    try std.testing.expect(!isKnownProviderName(&providers, "openai-extra"));
+
+    try std.testing.expectError(Config.ValidationError.UnknownAgentProvider, cfg.validate());
 }
 
-test "isKnownProviderName with empty providers list" {
-    const providers = [_]config_types.ProviderEntry{};
-    try std.testing.expect(!isKnownProviderName(&providers, "openai"));
+test "validation accepts named agent provider aliases from configured providers" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .providers = &.{.{ .name = "azure" }},
+        .default_model = "gpt-5.4",
+        .agents = &.{.{
+            .name = "worker",
+            .provider = "azure-openai",
+            .model = "gpt-5.4",
+        }},
+        .allocator = std.testing.allocator,
+    };
+
+    try cfg.validate();
 }
