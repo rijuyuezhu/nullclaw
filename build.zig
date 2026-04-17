@@ -40,15 +40,8 @@ fn hashWithCanonicalLineEndings(bytes: []const u8) [std.crypto.hash.sha2.Sha256.
     return digest;
 }
 
-// Compatibility shim for Zig 0.15 and 0.16 build APIs.
-fn readFileAllocCompat(b: *std.Build, sub_path: []const u8, max_bytes: usize) ![]u8 {
-    if (@hasField(std.Build, "graph")) {
-        return std.Io.Dir.cwd().readFileAlloc(b.graph.io, sub_path, b.allocator, .limited(max_bytes));
-    }
-
-    const file = try std.fs.cwd().openFile(sub_path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(b.allocator, max_bytes);
+fn readFileAllocCompat(dir: std.Io.Dir, io: std.Io, allocator: std.mem.Allocator, sub_path: []const u8, max_bytes: usize) ![]u8 {
+    return try dir.readFileAlloc(io, sub_path, allocator, .limited(max_bytes));
 }
 
 fn verifyVendoredSqliteHashes(b: *std.Build) !void {
@@ -57,7 +50,7 @@ fn verifyVendoredSqliteHashes(b: *std.Build) !void {
         const file_path = b.pathFromRoot(entry.path);
         defer b.allocator.free(file_path);
 
-        const bytes = readFileAllocCompat(b, file_path, max_vendor_file_size) catch |err| {
+        const bytes = readFileAllocCompat(std.Io.Dir.cwd(), b.graph.io, b.allocator, file_path, max_vendor_file_size) catch |err| {
             std.log.err("failed to read {s}: {s}", .{ file_path, @errorName(err) });
             return err;
         };
@@ -185,7 +178,7 @@ fn parseChannelsOption(raw: []const u8) !ChannelSelection {
             selection.enable_channel_lark = true;
         } else if (std.mem.eql(u8, token, "dingtalk")) {
             selection.enable_channel_dingtalk = true;
-        } else if (std.mem.eql(u8, token, "wechat")) {
+        } else if (std.mem.eql(u8, token, "wechat") or std.mem.eql(u8, token, "weixin")) {
             selection.enable_channel_wechat = true;
         } else if (std.mem.eql(u8, token, "wecom")) {
             selection.enable_channel_wecom = true;
@@ -344,13 +337,7 @@ fn parseEnginesOption(raw: []const u8) !EngineSelection {
 }
 
 fn envExists(b: *std.Build, name: []const u8) bool {
-    if (@hasField(std.Build, "graph")) {
-        return b.graph.environ_map.contains(name);
-    }
-
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
-    std.heap.page_allocator.free(value);
-    return true;
+    return b.graph.environ_map.get(name) != null;
 }
 
 fn ensureAndroidBuildEnvironment(b: *std.Build) void {
@@ -370,17 +357,8 @@ fn ensureAndroidBuildEnvironment(b: *std.Build) void {
         std.log.err("Install the Android NDK, generate a libc/sysroot file for the target, and pass it with --libc.", .{});
     }
     std.log.err("For native builds, run the build inside Termux without -Dtarget.", .{});
-    std.log.err("If you are seeing a build.zig.zon parse error mentioning '.nullclaw', your Zig version is not 0.15.2.", .{});
+    std.log.err("If you are seeing a build.zig.zon parse error mentioning '.nullclaw', your Zig version is not 0.16.0.", .{});
     std.process.exit(1);
-}
-
-fn linkLibraryCompat(compile: *std.Build.Step.Compile, library: *std.Build.Step.Compile) void {
-    if (@hasDecl(std.Build.Step.Compile, "linkLibrary")) {
-        compile.linkLibrary(library);
-        return;
-    }
-
-    compile.root_module.linkLibrary(library);
 }
 
 fn addEmbeddedWasm3(module: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
@@ -402,7 +380,7 @@ pub fn build(b: *std.Build) void {
     const channels_raw = b.option(
         []const u8,
         "channels",
-        "Channels list. Tokens: all|none|cli|telegram|discord|slack|whatsapp|matrix|mattermost|irc|imessage|email|lark|dingtalk|wechat|wecom|line|onebot|qq|maixcam|signal|nostr|web|max (default: all)",
+        "Channels list. Tokens: all|none|cli|telegram|discord|slack|whatsapp|matrix|mattermost|irc|imessage|email|lark|dingtalk|wechat|weixin|wecom|line|onebot|qq|maixcam|signal|nostr|web|max (default: all)",
     );
     const channels = if (channels_raw) |raw| blk: {
         const parsed = parseChannelsOption(raw) catch {
@@ -521,6 +499,11 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_channel_max", enable_channel_max);
     build_options.addOption(bool, "enable_embedded_wasm3", enable_embedded_wasm3);
     const build_options_module = build_options.createModule();
+    const compat_module = b.createModule(.{
+        .root_source_file = b.path("src/compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     // ---------- library module (importable by consumers) ----------
     const lib_mod: ?*std.Build.Module = if (is_wasi) null else blk: {
@@ -530,6 +513,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         module.addImport("build_options", build_options_module);
+        module.addImport("compat", compat_module);
         if (sqlite3) |lib| {
             module.linkLibrary(lib);
         }
@@ -541,6 +525,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             });
+            ws_dep.module("websocket").addImport("compat", compat_module);
             module.addImport("websocket", ws_dep.module("websocket"));
         }
         if (enable_embedded_wasm3) {
@@ -551,9 +536,12 @@ pub fn build(b: *std.Build) void {
 
     // ---------- executable ----------
     const exe_imports: []const std.Build.Module.Import = if (is_wasi)
-        &.{}
+        &.{.{ .name = "compat", .module = compat_module }}
     else
-        &.{.{ .name = "nullclaw", .module = lib_mod.? }};
+        &.{
+            .{ .name = "nullclaw", .module = lib_mod.? },
+            .{ .name = "compat", .module = compat_module },
+        };
 
     const exe_root_module = b.createModule(.{
         .root_source_file = if (is_wasi) b.path("src/main_wasi.zig") else b.path("src/main.zig"),
@@ -577,7 +565,7 @@ pub fn build(b: *std.Build) void {
     // Link SQLite on the compile step (not the module)
     if (!is_wasi) {
         if (sqlite3) |lib| {
-            linkLibraryCompat(exe, lib);
+            exe.root_module.linkLibrary(lib);
         }
         if (enable_postgres) {
             exe.root_module.linkSystemLibrary("pq", .{});
@@ -617,7 +605,7 @@ pub fn build(b: *std.Build) void {
     if (!is_wasi) {
         const lib_tests = b.addTest(.{ .root_module = lib_mod.? });
         if (sqlite3) |lib| {
-            linkLibraryCompat(lib_tests, lib);
+            lib_tests.root_module.linkLibrary(lib);
         }
         if (enable_postgres) {
             lib_tests.root_module.linkSystemLibrary("pq", .{});
@@ -627,4 +615,12 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(lib_tests).step);
         test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     }
+}
+
+test "parse channels option accepts weixin alias" {
+    // Regression: `-Dchannels=weixin` must enable the shared WeChat build flag.
+    const parsed = try parseChannelsOption("weixin");
+
+    try std.testing.expect(parsed.enable_channel_wechat);
+    try std.testing.expect(!parsed.enable_channel_wecom);
 }
