@@ -82,6 +82,22 @@ pub fn isVisionUnsupportedText(text: []const u8) bool {
     {
         return true;
     }
+
+    // infini-ai reports unsupported vision inputs as:
+    // "message type 'image_url' is not supported for model 'glm-5'"
+    if (containsAsciiFold(text, "image_url") and containsAsciiFold(text, "not supported")) {
+        return true;
+    }
+
     return false;
 }
 
+test "isVisionUnsupportedText matches infini-ai phrasing" {
+    const text = "Bad Request: [message type 'image_url' is not supported for model 'glm-5']";
+    try std.testing.expect(isVisionUnsupportedText(text));
+}
+
+test "isVisionUnsupportedText does not false-positive on unrelated image mention" {
+    const text = "Please provide an image description";
+    try std.testing.expect(!isVisionUnsupportedText(text));
+}
