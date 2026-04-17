@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const http_util = @import("http_util.zig");
 const json_miniparse = @import("json_miniparse.zig");
 
 // SkillForge -- skill auto-discovery, evaluation, and integration engine.
@@ -86,13 +87,13 @@ pub fn scout(allocator: std.mem.Allocator, query: []const u8) !std.ArrayList(Ski
     defer allocator.free(url);
 
     // Fetch from GitHub API using std.http.Client
-    var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
+    var client = try http_util.ProxyHttpClient.init(allocator);
     defer client.deinit();
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
 
-    const result = client.fetch(.{
+    const result = client.client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
         .extra_headers = &.{

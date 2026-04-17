@@ -35,7 +35,7 @@ pub const McpServer = struct {
     name: []const u8,
     config: McpServerConfig,
     child: ?std_compat.process.Child,
-    http_client: ?std.http.Client,
+    http_client: ?http_util.ProxyHttpClient,
     next_id: u32,
     mcp_session_id: ?[]u8,
 
@@ -130,7 +130,7 @@ pub const McpServer = struct {
         _ = std.Uri.parse(url) catch return error.InvalidHttpUrl;
         if (!McpServerConfig.isValidHttpUrl(url)) return error.InvalidHttpUrl;
 
-        self.http_client = std.http.Client{ .allocator = self.allocator, .io = std_compat.io() };
+        self.http_client = try http_util.ProxyHttpClient.init(self.allocator);
     }
 
     /// Request the list of tools from the MCP server.

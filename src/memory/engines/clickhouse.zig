@@ -10,6 +10,7 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const build_options = @import("build_options");
+const http_util = @import("../../http_util.zig");
 const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
@@ -380,7 +381,7 @@ const ClickHouseMemoryImpl = struct {
         const url = try url_buf.toOwnedSlice(allocator);
         defer allocator.free(url);
 
-        var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
+        var client = try http_util.ProxyHttpClient.init(allocator);
         defer client.deinit();
 
         var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -397,7 +398,7 @@ const ClickHouseMemoryImpl = struct {
             header_count += 1;
         }
 
-        const result = client.fetch(.{
+        const result = client.client.fetch(.{
             .location = .{ .url = url },
             .method = .POST,
             .payload = query,
@@ -445,7 +446,7 @@ const ClickHouseMemoryImpl = struct {
         const url = try url_buf.toOwnedSlice(self.allocator);
         defer self.allocator.free(url);
 
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = std_compat.io() };
+        var client = try http_util.ProxyHttpClient.init(self.allocator);
         defer client.deinit();
 
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
@@ -462,7 +463,7 @@ const ClickHouseMemoryImpl = struct {
             header_count += 1;
         }
 
-        const result = client.fetch(.{
+        const result = client.client.fetch(.{
             .location = .{ .url = url },
             .method = .POST,
             .payload = query,
