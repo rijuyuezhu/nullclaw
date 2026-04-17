@@ -259,7 +259,7 @@ test "contract: none session_id" {
 test "contract: markdown basics" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(base);
 
     var mem = try MarkdownMemory.init(std.testing.allocator, base);
@@ -270,7 +270,7 @@ test "contract: markdown basics" {
 test "contract: markdown append-only" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(base);
 
     var mem = try MarkdownMemory.init(std.testing.allocator, base);
@@ -281,7 +281,7 @@ test "contract: markdown append-only" {
 test "contract: markdown session_id" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(base);
 
     var mem = try MarkdownMemory.init(std.testing.allocator, base);
