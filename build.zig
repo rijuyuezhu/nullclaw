@@ -397,7 +397,7 @@ pub fn build(b: *std.Build) void {
     const engines_raw = b.option(
         []const u8,
         "engines",
-        "Memory engines list. Tokens: base|minimal|all|none|markdown|memory|api|sqlite|lucid|redis|lancedb|postgres|clickhouse (default: base,sqlite)",
+        "Memory engines list. Tokens: base|minimal|all|none|markdown|memory|api|sqlite|lucid|redis|lancedb|postgres|clickhouse|kg (default: base,sqlite)",
     );
     const engines = if (engines_raw) |raw| blk: {
         const parsed = parseEnginesOption(raw) catch {

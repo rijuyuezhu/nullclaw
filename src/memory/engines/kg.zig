@@ -20,6 +20,7 @@
 //!   plain text                             — FTS5 search on entity content
 
 const std = @import("std");
+const std_compat = @import("compat");
 const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
@@ -33,6 +34,13 @@ const PATH_QUERY_PREFIX = "kg:path:";
 const RELATIONS_QUERY_PREFIX = "kg:relations:";
 const RELATION_CATEGORY = "relation";
 const DEFAULT_QUERY_LIMIT: usize = 100;
+
+const ParsedRelationKey = struct {
+    id: []const u8,
+    subject_id: []const u8,
+    predicate: []const u8,
+    object_id: []const u8,
+};
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");
@@ -54,6 +62,9 @@ pub const KgMemory = struct {
         if (rc != c.SQLITE_OK) {
             if (db) |d| _ = c.sqlite3_close(d);
             return error.SqliteOpenFailed;
+        }
+        errdefer {
+            if (db) |d| _ = c.sqlite3_close(d);
         }
         if (db) |d| {
             _ = c.sqlite3_busy_timeout(d, BUSY_TIMEOUT_MS);
@@ -124,7 +135,7 @@ pub const KgMemory = struct {
     }
 
     fn getNowTimestamp(allocator: std.mem.Allocator) ![]u8 {
-        const ts = std.time.timestamp();
+        const ts = std_compat.time.timestamp();
         return std.fmt.allocPrint(allocator, "{d}", .{ts});
     }
 
@@ -142,6 +153,27 @@ pub const KgMemory = struct {
         return key;
     }
 
+    fn parseRelationKey(key: []const u8) !ParsedRelationKey {
+        if (!std.mem.startsWith(u8, key, RELATION_STORE_PREFIX)) return error.InvalidRelationKey;
+
+        const id = relationIdForKey(key);
+        var it = std.mem.splitScalar(u8, id, ':');
+        const subject_id = it.next() orelse return error.InvalidRelationKey;
+        const predicate = it.next() orelse return error.InvalidRelationKey;
+        const object_id = it.rest();
+
+        if (subject_id.len == 0 or predicate.len == 0 or object_id.len == 0) {
+            return error.InvalidRelationKey;
+        }
+
+        return .{
+            .id = id,
+            .subject_id = subject_id,
+            .predicate = predicate,
+            .object_id = object_id,
+        };
+    }
+
     fn categoryFromOwnedString(allocator: std.mem.Allocator, raw: []u8) MemoryCategory {
         const parsed = MemoryCategory.fromString(raw);
         switch (parsed) {
@@ -151,6 +183,10 @@ pub const KgMemory = struct {
             },
             .custom => return .{ .custom = raw },
         }
+    }
+
+    fn isRelationCategory(category: MemoryCategory) bool {
+        return std.mem.eql(u8, category.toString(), RELATION_CATEGORY);
     }
 
     fn buildFtsQuery(allocator: std.mem.Allocator, query: []const u8) ![]u8 {
@@ -262,13 +298,26 @@ pub const KgMemory = struct {
         }
 
         const sql =
-            \\WITH RECURSIVE traversal(id, depth) AS (
-            \\  SELECT id, 0 FROM kg_entities WHERE id = ?1
+            \\WITH RECURSIVE traversal(path_ids, id, depth) AS (
+            \\  SELECT '<' || ?1, ?1, 0
             \\  UNION ALL
-            \\  SELECT r.object_id, t.depth + 1 FROM kg_relations r, traversal t
-            \\   WHERE r.subject_id = t.id AND t.depth < ?2
+            \\  SELECT t.path_ids || '<' || r.object_id, r.object_id, t.depth + 1
+            \\   FROM kg_relations r
+            \\   JOIN traversal t ON r.subject_id = t.id
+            \\   WHERE t.depth < ?2
+            \\     AND INSTR(t.path_ids || '<', '<' || r.object_id || '<') = 0
             \\)
-            \\SELECT e.id, e.type, e.content, e.created_at FROM kg_entities e, traversal t WHERE e.id = t.id LIMIT ?3
+            \\, ranked(id, depth) AS (
+            \\  SELECT id, MIN(depth)
+            \\  FROM traversal
+            \\  GROUP BY id
+            \\  ORDER BY MIN(depth) ASC, id ASC
+            \\  LIMIT ?3
+            \\)
+            \\SELECT e.id, e.type, e.content, e.created_at
+            \\FROM ranked t
+            \\JOIN kg_entities e ON e.id = t.id
+            \\ORDER BY t.depth ASC, e.id ASC
         ;
 
         var stmt: ?*c.sqlite3_stmt = null;
@@ -376,6 +425,54 @@ pub const KgMemory = struct {
         }
 
         return entries.toOwnedSlice(allocator);
+    }
+
+    fn appendEntityList(self: *Self, entries: *std.ArrayListUnmanaged(MemoryEntry), allocator: std.mem.Allocator, category: ?MemoryCategory) !void {
+        const sql = if (category) |_|
+            "SELECT id, type, content, created_at FROM kg_entities WHERE type = ?1 ORDER BY created_at DESC, id DESC"
+        else
+            "SELECT id, type, content, created_at FROM kg_entities ORDER BY created_at DESC, id DESC";
+
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        if (category) |cat| {
+            const cat_str = cat.toString();
+            _ = c.sqlite3_bind_text(stmt, 1, cat_str.ptr, @intCast(cat_str.len), SQLITE_STATIC);
+        }
+
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try entries.append(allocator, try self.readEntityFromRow(stmt.?, allocator));
+        }
+    }
+
+    fn appendRelationList(self: *Self, entries: *std.ArrayListUnmanaged(MemoryEntry), allocator: std.mem.Allocator) !void {
+        const sql =
+            \\SELECT id, subject_id, predicate, object_id, created_at
+            \\FROM kg_relations
+            \\ORDER BY created_at DESC, id DESC
+        ;
+
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try entries.append(allocator, try self.readRelationFromRow(stmt.?, allocator));
+        }
+    }
+
+    fn deleteRelationsForEntity(self: *Self, entity_id: []const u8) !void {
+        const sql = "DELETE FROM kg_relations WHERE subject_id = ?1 OR object_id = ?1";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, entity_id.ptr, @intCast(entity_id.len), SQLITE_STATIC);
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) return error.StepFailed;
     }
 
     fn getRelationById(self: *Self, allocator: std.mem.Allocator, relation_id: []const u8) !?MemoryEntry {
@@ -527,15 +624,8 @@ pub const KgMemory = struct {
             const entity_id = entityIdForKey(key);
             try self_.storeEntity(entity_id, cat_str, content);
         } else if (std.mem.startsWith(u8, key, RELATION_STORE_PREFIX)) {
-            // Format: __kg:rel:{subject_id}:{predicate}:{object_id}
-            const rel_id = relationIdForKey(key);
-            const rel_part = rel_id;
-            var it = std.mem.splitScalar(u8, rel_part, ':');
-            const subject_id = it.next() orelse return error.StepFailed;
-            const predicate = it.next() orelse return error.StepFailed;
-            const object_id = it.rest();
-
-            try self_.storeRelation(rel_id, subject_id, predicate, object_id);
+            const parsed = try parseRelationKey(key);
+            try self_.storeRelation(parsed.id, parsed.subject_id, parsed.predicate, parsed.object_id);
         } else {
             // Generic key — treat as entity
             try self_.storeEntity(key, cat_str, content);
@@ -605,23 +695,15 @@ pub const KgMemory = struct {
             entries.deinit(allocator);
         }
 
-        const sql = if (category) |_|
-            "SELECT id, type, content, created_at FROM kg_entities WHERE type = ?1 ORDER BY created_at DESC"
-        else
-            "SELECT id, type, content, created_at FROM kg_entities ORDER BY created_at DESC";
-
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self_.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
-        defer _ = c.sqlite3_finalize(stmt);
-
         if (category) |cat| {
-            const cat_str = cat.toString();
-            _ = c.sqlite3_bind_text(stmt, 1, cat_str.ptr, @intCast(cat_str.len), SQLITE_STATIC);
-        }
-
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            const entry = try self_.readEntityFromRow(stmt.?, allocator);
-            try entries.append(allocator, entry);
+            if (isRelationCategory(cat)) {
+                try self_.appendRelationList(&entries, allocator);
+            } else {
+                try self_.appendEntityList(&entries, allocator, cat);
+            }
+        } else {
+            try self_.appendEntityList(&entries, allocator, null);
+            try self_.appendRelationList(&entries, allocator);
         }
 
         return entries.toOwnedSlice(allocator);
@@ -643,6 +725,7 @@ pub const KgMemory = struct {
             if (rc != c.SQLITE_DONE) return error.StepFailed;
             if (c.sqlite3_changes(self_.db) > 0) {
                 try self_.deleteEntityFts(entity_id);
+                try self_.deleteRelationsForEntity(entity_id);
                 return true;
             }
         }
@@ -665,7 +748,7 @@ pub const KgMemory = struct {
     fn implCount(ptr: *anyopaque) anyerror!usize {
         const self_: *Self = @ptrCast(@alignCast(ptr));
 
-        const sql = "SELECT COUNT(*) FROM kg_entities";
+        const sql = "SELECT (SELECT COUNT(*) FROM kg_entities) + (SELECT COUNT(*) FROM kg_relations)";
         var stmt: ?*c.sqlite3_stmt = null;
         var rc = c.sqlite3_prepare_v2(self_.db, sql, -1, &stmt, null);
         if (rc != c.SQLITE_OK) return error.PrepareFailed;
@@ -874,4 +957,82 @@ test "kg relations recall respects requested limit" {
     const results = try m.recall(std.testing.allocator, "kg:relations:hub", 1, null);
     defer root.freeEntries(std.testing.allocator, results);
     try std.testing.expectEqual(@as(usize, 1), results.len);
+}
+
+test "kg traverse deduplicates cyclic paths" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: cyclic traversals must not return repeated entities.
+    try m.store("__kg:entity:a", "Alice", .core, null);
+    try m.store("__kg:entity:b", "Bob", .core, null);
+    try m.store("__kg:rel:a:links:b", "", .core, null);
+    try m.store("__kg:rel:b:links:a", "", .core, null);
+
+    const results = try m.recall(std.testing.allocator, "kg:traverse:a:4", 10, null);
+    defer root.freeEntries(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("a", results[0].key);
+    try std.testing.expectEqualStrings("b", results[1].key);
+}
+
+test "kg count includes relations" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: relation entries stored through the vtable must contribute to count().
+    try m.store("__kg:entity:a", "Alice", .core, null);
+    try m.store("__kg:entity:b", "Bob", .core, null);
+    try m.store("__kg:rel:a:knows:b", "", .core, null);
+
+    try std.testing.expectEqual(@as(usize, 3), try m.count());
+}
+
+test "kg list can return relation entries" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: list() must surface relation entries instead of hiding half the store.
+    try m.store("__kg:entity:a", "Alice", .core, null);
+    try m.store("__kg:entity:b", "Bob", .core, null);
+    try m.store("__kg:rel:a:knows:b", "", .core, null);
+
+    const all_entries = try m.list(std.testing.allocator, null, null);
+    defer root.freeEntries(std.testing.allocator, all_entries);
+    try std.testing.expectEqual(@as(usize, 3), all_entries.len);
+
+    const relation_entries = try m.list(std.testing.allocator, .{ .custom = RELATION_CATEGORY }, null);
+    defer root.freeEntries(std.testing.allocator, relation_entries);
+    try std.testing.expectEqual(@as(usize, 1), relation_entries.len);
+    try std.testing.expectEqualStrings("__kg:rel:a:knows:b", relation_entries[0].key);
+}
+
+test "kg forgetting entity removes incident relations" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: forgetting an entity must not leave orphaned edges behind.
+    try m.store("__kg:entity:a", "Alice", .core, null);
+    try m.store("__kg:entity:b", "Bob", .core, null);
+    try m.store("__kg:rel:a:knows:b", "", .core, null);
+
+    try std.testing.expect(try m.forget("__kg:entity:a"));
+    try std.testing.expectEqual(@as(usize, 1), try m.count());
+    const relation = try m.get(std.testing.allocator, "__kg:rel:a:knows:b");
+    defer if (relation) |entry| entry.deinit(std.testing.allocator);
+    try std.testing.expect(relation == null);
+}
+
+test "kg rejects malformed relation keys" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: malformed relation keys must fail fast instead of creating partial rows.
+    try std.testing.expectError(error.InvalidRelationKey, m.store("__kg:rel:a:knows:", "", .core, null));
 }
