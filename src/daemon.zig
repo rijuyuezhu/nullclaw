@@ -7,6 +7,7 @@
 //!   - Ctrl+C graceful shutdown
 
 const std = @import("std");
+const std_compat = @import("compat");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
 const CronScheduler = @import("cron.zig").CronScheduler;
@@ -14,6 +15,7 @@ const cron = @import("cron.zig");
 const bus_mod = @import("bus.zig");
 const channels_mod = @import("channels/root.zig");
 const dispatch = @import("channels/dispatch.zig");
+const channel_outbox = @import("channels/outbox.zig");
 const channel_loop = @import("channel_loop.zig");
 const channel_manager = @import("channel_manager.zig");
 const agent_routing = @import("agent_routing.zig");
@@ -23,6 +25,7 @@ const heartbeat_mod = @import("heartbeat.zig");
 const inbound_debounce = @import("inbound_debounce.zig");
 const interaction_choices = @import("interactions/choices.zig");
 const memory_mod = @import("memory/root.zig");
+const outbound = @import("outbound.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const onboard = @import("onboard.zig");
 const streaming = @import("streaming.zig");
@@ -100,10 +103,17 @@ pub const DaemonState = struct {
 /// Compute the path to daemon_state.json from config.
 pub fn stateFilePath(allocator: std.mem.Allocator, config: *const Config) ![]u8 {
     // Use config directory (parent of config_path)
-    if (std.fs.path.dirname(config.config_path)) |dir| {
-        return std.fs.path.join(allocator, &.{ dir, "daemon_state.json" });
+    if (std_compat.fs.path.dirname(config.config_path)) |dir| {
+        return std_compat.fs.path.join(allocator, &.{ dir, "daemon_state.json" });
     }
     return allocator.dupe(u8, "daemon_state.json");
+}
+
+pub fn outboundDeliveryPath(allocator: std.mem.Allocator, config: *const Config) ![]u8 {
+    if (std_compat.fs.path.dirname(config.config_path)) |dir| {
+        return std_compat.fs.path.join(allocator, &.{ dir, "state", "outbound_delivery.json" });
+    }
+    return allocator.dupe(u8, "outbound_delivery.json");
 }
 
 /// Write daemon state to disk as JSON.
@@ -113,12 +123,12 @@ pub fn writeStateFile(allocator: std.mem.Allocator, path: []const u8, state: *co
 
     try buf.appendSlice(allocator, "{\n");
     try buf.appendSlice(allocator, "  \"status\": \"running\",\n");
-    try std.fmt.format(buf.writer(allocator), "  \"gateway\": \"{s}:{d}\",\n", .{ state.gateway_host, state.gateway_port });
+    try buf.print(allocator, "  \"gateway\": \"{s}:{d}\",\n", .{ state.gateway_host, state.gateway_port });
 
     // Tunnel info
-    try std.fmt.format(buf.writer(allocator), "  \"tunnel_provider\": \"{s}\",\n", .{state.tunnel_provider});
+    try buf.print(allocator, "  \"tunnel_provider\": \"{s}\",\n", .{state.tunnel_provider});
     if (state.tunnel_url) |url| {
-        try std.fmt.format(buf.writer(allocator), "  \"tunnel_url\": \"{s}\",\n", .{url});
+        try buf.print(allocator, "  \"tunnel_url\": \"{s}\",\n", .{url});
     } else {
         try buf.appendSlice(allocator, "  \"tunnel_url\": null,\n");
     }
@@ -130,14 +140,14 @@ pub fn writeStateFile(allocator: std.mem.Allocator, path: []const u8, state: *co
         if (comp_opt) |comp| {
             if (!first) try buf.appendSlice(allocator, ",\n");
             first = false;
-            try std.fmt.format(buf.writer(allocator),
+            try buf.print(allocator,
                 \\    {{"name": "{s}", "running": {}, "restart_count": {d}}}
             , .{ comp.name, comp.running, comp.restart_count });
         }
     }
     try buf.appendSlice(allocator, "\n  ]\n}\n");
 
-    const file = try std.fs.createFileAbsolute(path, .{});
+    const file = try std_compat.fs.createFileAbsolute(path, .{});
     defer file.close();
     try file.writeAll(buf.items);
 }
@@ -225,18 +235,18 @@ fn heartbeatThread(allocator: std.mem.Allocator, config: *const Config, state: *
     defer if (heartbeat_engine.bootstrap_provider) |bp| bp.deinit();
 
     const heartbeat_interval_ns: i128 = @as(i128, @intCast(heartbeat_engine.interval_minutes)) * 60 * std.time.ns_per_s;
-    var next_heartbeat_tick_at_ns: i128 = std.time.nanoTimestamp() + heartbeat_interval_ns;
+    var next_heartbeat_tick_at_ns: i128 = std_compat.time.nanoTimestamp() + heartbeat_interval_ns;
 
     while (!isShutdownRequested()) {
         writeStateFile(allocator, state_path, state) catch {};
         health.markComponentOk("heartbeat");
 
-        const now_ns = std.time.nanoTimestamp();
+        const now_ns = std_compat.time.nanoTimestamp();
         if (heartbeat_engine.enabled and now_ns >= next_heartbeat_tick_at_ns) {
             const tick_result = heartbeat_engine.tick(allocator) catch |err| {
                 log.warn("heartbeat tick failed: {s}", .{@errorName(err)});
                 next_heartbeat_tick_at_ns = now_ns + heartbeat_interval_ns;
-                std.Thread.sleep(STATUS_FLUSH_SECONDS * std.time.ns_per_s);
+                std_compat.thread.sleep(STATUS_FLUSH_SECONDS * std.time.ns_per_s);
                 continue;
             };
             switch (tick_result.outcome) {
@@ -247,7 +257,7 @@ fn heartbeatThread(allocator: std.mem.Allocator, config: *const Config, state: *
             next_heartbeat_tick_at_ns = now_ns + heartbeat_interval_ns;
         }
 
-        std.Thread.sleep(STATUS_FLUSH_SECONDS * std.time.ns_per_s);
+        std_compat.thread.sleep(STATUS_FLUSH_SECONDS * std.time.ns_per_s);
     }
 }
 
@@ -494,7 +504,7 @@ fn schedulerThread(allocator: std.mem.Allocator, config: *const Config, state: *
             };
 
             if (snapshot_ok) {
-                const changed = scheduler.tick(std.time.timestamp(), event_bus);
+                const changed = scheduler.tick(std_compat.time.timestamp(), event_bus);
                 if (changed) {
                     mergeSchedulerTickChangesAndSave(allocator, &scheduler, &before_tick) catch |err| {
                         log.warn("scheduler merge-save failed: {}", .{err});
@@ -508,7 +518,7 @@ fn schedulerThread(allocator: std.mem.Allocator, config: *const Config, state: *
         if (!snapshot_ok) {
             var snapshot_sleep: u64 = 0;
             while (snapshot_sleep < poll_secs and !isShutdownRequested()) : (snapshot_sleep += 1) {
-                std.Thread.sleep(std.time.ns_per_s);
+                std_compat.thread.sleep(std.time.ns_per_s);
             }
             continue;
         }
@@ -518,7 +528,7 @@ fn schedulerThread(allocator: std.mem.Allocator, config: *const Config, state: *
 
         var slept: u64 = 0;
         while (slept < poll_secs and !isShutdownRequested()) : (slept += 1) {
-            std.Thread.sleep(std.time.ns_per_s);
+            std_compat.thread.sleep(std.time.ns_per_s);
         }
     }
 }
@@ -599,6 +609,9 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
         }
         if (pm.value.object.get("message_id")) |v| {
             if (v == .string and v.string.len > 0) parsed.fields.message_id = v.string;
+        }
+        if (pm.value.object.get("replace_message")) |v| {
+            if (v == .bool) parsed.fields.replace_message = v.bool;
         }
         if (pm.value.object.get("guild_id")) |v| {
             if (v == .string) parsed.fields.guild_id = v.string;
@@ -986,6 +999,62 @@ fn makeAssistantReplyOutbound(
     return msg;
 }
 
+const AssistantReplyPayload = struct {
+    text: []u8,
+    choices: []outbound.Choice,
+
+    fn deinit(self: *AssistantReplyPayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        for (self.choices) |choice| choice.deinit(allocator);
+        allocator.free(self.choices);
+    }
+
+    fn payload(self: *const AssistantReplyPayload) outbound.Payload {
+        return .{
+            .text = self.text,
+            .choices = self.choices,
+        };
+    }
+};
+
+fn makeAssistantReplyPayload(allocator: std.mem.Allocator, reply: []const u8) !AssistantReplyPayload {
+    if (std.mem.indexOf(u8, reply, interaction_choices.START_TAG) == null) {
+        return .{
+            .text = try allocator.dupe(u8, reply),
+            .choices = try allocator.alloc(outbound.Choice, 0),
+        };
+    }
+
+    var parsed = try interaction_choices.parseAssistantChoices(allocator, reply);
+    defer parsed.deinit(allocator);
+
+    const choices = if (parsed.choices) |choices| blk: {
+        const duped = try allocator.alloc(outbound.Choice, choices.options.len);
+        var i: usize = 0;
+        errdefer {
+            for (duped[0..i]) |choice| choice.deinit(allocator);
+            allocator.free(duped);
+        }
+        while (i < choices.options.len) : (i += 1) {
+            duped[i] = .{
+                .id = try allocator.dupe(u8, choices.options[i].id),
+                .label = try allocator.dupe(u8, choices.options[i].label),
+                .submit_text = try allocator.dupe(u8, choices.options[i].submit_text),
+            };
+        }
+        break :blk duped;
+    } else try allocator.alloc(outbound.Choice, 0);
+    errdefer {
+        for (choices) |choice| choice.deinit(allocator);
+        allocator.free(choices);
+    }
+
+    return .{
+        .text = try allocator.dupe(u8, parsed.visible_text),
+        .choices = choices,
+    };
+}
+
 fn makeStreamingSinkForChannel(
     streaming_supported: bool,
     raw_sink: streaming.Sink,
@@ -1165,6 +1234,38 @@ fn inboundDispatcherThread(
             };
             defer allocator.free(reply);
 
+            if ((parsed_meta.fields.replace_message orelse false) and parsed_meta.fields.message_id != null) {
+                if (outbound_channel) |channel| {
+                    var payload = makeAssistantReplyPayload(allocator, reply) catch |err| {
+                        log.warn("failed to build edit payload: {}", .{err});
+                        const out = makeAssistantReplyOutbound(
+                            allocator,
+                            msg.channel,
+                            outbound_account_id,
+                            msg.chat_id,
+                            reply,
+                            outbound_draft_id,
+                        ) catch continue;
+                        event_bus.publishOutbound(out) catch |publish_err| {
+                            out.deinit(allocator);
+                            log.err("inbound dispatch publishOutbound failed: {}", .{publish_err});
+                        };
+                        continue;
+                    };
+                    defer payload.deinit(allocator);
+
+                    if (channel.editMessage(.{
+                        .target = msg.chat_id,
+                        .message_id = parsed_meta.fields.message_id.?,
+                        .payload = payload.payload(),
+                    })) |_| {
+                        continue;
+                    } else |err| {
+                        log.warn("editMessage failed; falling back to normal outbound: {}", .{err});
+                    }
+                }
+            }
+
             const out = makeAssistantReplyOutbound(
                 allocator,
                 msg.channel,
@@ -1280,7 +1381,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     var tunnel = startConfiguredTunnel(allocator, config, host, port, &state);
 
     var stdout_buf: [4096]u8 = undefined;
-    var bw = std.fs.File.stdout().writer(&stdout_buf);
+    var bw = std_compat.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
     try stdout.print("nullclaw gateway runtime started\n", .{});
     try stdout.print("  Gateway:  http://{s}:{d}\n", .{ state.gateway_host, state.gateway_port });
@@ -1392,12 +1493,23 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     }
 
     var dispatch_stats = dispatch.DispatchStats{};
+    const delivery_path = try outboundDeliveryPath(allocator, config);
+    defer allocator.free(delivery_path);
+    if (std_compat.fs.path.dirname(delivery_path)) |delivery_dir| {
+        std_compat.fs.makeDirAbsolute(delivery_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    var delivery_outbox = try channel_outbox.DeliveryOutbox.init(allocator, delivery_path);
+    defer delivery_outbox.deinit();
 
     state.addComponent("outbound_dispatcher");
+    state.addComponent("outbound_delivery");
 
     var dispatcher_thread: ?std.Thread = null;
-    if (std.Thread.spawn(.{ .stack_size = thread_stacks.HEAVY_RUNTIME_STACK_SIZE }, dispatch.runOutboundDispatcher, .{
-        allocator, &event_bus, &channel_registry, &dispatch_stats,
+    if (std.Thread.spawn(.{ .stack_size = thread_stacks.HEAVY_RUNTIME_STACK_SIZE }, dispatch.runOutboundDispatcherWithOutbox, .{
+        allocator, &event_bus, &channel_registry, &dispatch_stats, &delivery_outbox,
     })) |thread| {
         dispatcher_thread = thread;
         state.markRunning("outbound_dispatcher");
@@ -1407,15 +1519,28 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         stdout.print("Warning: outbound dispatcher thread failed: {}\n", .{err}) catch {};
     }
 
+    var delivery_thread: ?std.Thread = null;
+    if (std.Thread.spawn(.{ .stack_size = thread_stacks.HEAVY_RUNTIME_STACK_SIZE }, dispatch.runDurableOutboundWorker, .{
+        allocator, &delivery_outbox, &channel_registry,
+    })) |thread| {
+        delivery_thread = thread;
+        state.markRunning("outbound_delivery");
+        health.markComponentOk("outbound_delivery");
+    } else |err| {
+        state.markError("outbound_delivery", @errorName(err));
+        stdout.print("Warning: outbound delivery thread failed: {}\n", .{err}) catch {};
+    }
+
     // Main thread: wait for shutdown signal (poll-based)
     while (!isShutdownRequested()) {
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        std_compat.thread.sleep(1 * std.time.ns_per_s);
     }
 
     try stdout.print("\nShutting down...\n", .{});
 
     // Close bus to signal dispatcher to exit
     event_bus.close();
+    delivery_outbox.close();
 
     // Write final state
     state.markError("gateway", "shutting down");
@@ -1424,6 +1549,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     // Wait for threads
     if (inbound_thread) |t| t.join();
     if (dispatcher_thread) |t| t.join();
+    if (delivery_thread) |t| t.join();
     if (chan_thread) |t| t.join();
     if (sched_thread) |t| t.join();
     if (hb_thread) |t| t.join();
@@ -2386,6 +2512,17 @@ test "parseInboundMetadata extracts message_id and thread_id" {
     try std.testing.expectEqualStrings("1700.0", parsed.fields.thread_id.?);
 }
 
+test "parseInboundMetadata extracts replace_message flag" {
+    var parsed = parseInboundMetadata(
+        std.testing.allocator,
+        "{\"message_id\":\"42\",\"replace_message\":true}",
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("42", parsed.fields.message_id.?);
+    try std.testing.expectEqual(true, parsed.fields.replace_message.?);
+}
+
 test "parseInboundMetadata extracts discord sender identity fields" {
     var parsed = parseInboundMetadata(
         std.testing.allocator,
@@ -2655,7 +2792,7 @@ test "stateFilePath derives from config_path" {
     };
     const path = try stateFilePath(std.testing.allocator, &config);
     defer std.testing.allocator.free(path);
-    const expected = try std.fs.path.join(std.testing.allocator, &.{ "/home/user/.nullclaw", "daemon_state.json" });
+    const expected = try std_compat.fs.path.join(std.testing.allocator, &.{ "/home/user/.nullclaw", "daemon_state.json" });
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, path);
 }
@@ -2713,7 +2850,7 @@ test "mergeSchedulerTickChangesAndSave preserves externally added jobs" {
     _ = try external.addJob("*/5 * * * *", cmd_external);
     try cron.saveJobs(&external);
 
-    _ = loaded.tick(std.time.timestamp(), null);
+    _ = loaded.tick(std_compat.time.timestamp(), null);
     try mergeSchedulerTickChangesAndSave(allocator, &loaded, &before_tick);
 
     var merged = CronScheduler.init(allocator, 64, true);
@@ -2769,7 +2906,7 @@ test "mergeSchedulerTickChangesAndSave preserves runtime agent fields" {
     defer external.deinit();
     try cron.saveJobs(&external);
 
-    _ = loaded.tick(std.time.timestamp(), null);
+    _ = loaded.tick(std_compat.time.timestamp(), null);
     try mergeSchedulerTickChangesAndSave(allocator, &loaded, &before_tick);
 
     var merged = CronScheduler.init(allocator, 32, true);
@@ -2937,15 +3074,15 @@ test "writeStateFile produces valid content" {
     // Write to a temp path
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir);
-    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
+    const path = try std_compat.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
     defer std.testing.allocator.free(path);
 
     try writeStateFile(std.testing.allocator, path, &state);
 
     // Read back and verify
-    const file = try std.fs.openFileAbsolute(path, .{});
+    const file = try std_compat.fs.openFileAbsolute(path, .{});
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(content);
@@ -2968,14 +3105,14 @@ test "writeStateFile includes tunnel fields" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir);
-    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
+    const path = try std_compat.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
     defer std.testing.allocator.free(path);
 
     try writeStateFile(std.testing.allocator, path, &state);
 
-    const file = try std.fs.openFileAbsolute(path, .{});
+    const file = try std_compat.fs.openFileAbsolute(path, .{});
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(content);
@@ -2995,14 +3132,14 @@ test "writeStateFile handles null tunnel_url" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir);
-    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
+    const path = try std_compat.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
     defer std.testing.allocator.free(path);
 
     try writeStateFile(std.testing.allocator, path, &state);
 
-    const file = try std.fs.openFileAbsolute(path, .{});
+    const file = try std_compat.fs.openFileAbsolute(path, .{});
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(content);

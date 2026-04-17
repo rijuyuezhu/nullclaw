@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const std_compat = @import("compat");
 const http_util = @import("../http_util.zig");
 
 const log = std.log.scoped(.botframework_auth);
@@ -66,7 +67,7 @@ pub const JwksKey = struct {
 };
 
 pub const KeyCache = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std_compat.sync.Mutex = .{},
     fetched_at: i64 = 0,
     keys: std.ArrayListUnmanaged(JwksKey) = .empty,
 
@@ -84,7 +85,7 @@ pub const KeyCache = struct {
         service_url: []const u8,
         channel_id: []const u8,
     ) VerifyError!void {
-        return self.verifyConnectorTokenAt(allocator, token, app_id, service_url, channel_id, std.time.timestamp());
+        return self.verifyConnectorTokenAt(allocator, token, app_id, service_url, channel_id, std_compat.time.timestamp());
     }
 
     fn verifyConnectorTokenAt(

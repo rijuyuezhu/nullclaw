@@ -76,7 +76,7 @@ nullclaw onboard --interactive
 - 用于控制运行时诊断与可观测性输出。
 - 配置 OpenTelemetry 时，请使用嵌套的 `diagnostics.otel` 对象。
 - OTEL spans 会在回合完成、agent 结束等自然运行边界触发 flush；更长运行流程仍保留批量 flush 作为兜底。
-- `diagnostics.otel.endpoint` 连接远程 collector 时必须使用 `https://...`；`http://...` 仅允许用于 `http://127.0.0.1:4318` 这类 localhost/私有地址。
+- `diagnostics.otel.endpoint` 连接远程 collector 时应优先使用 `https://...`；`http://...` 仅适用于 localhost、私有网络 collector，或 `host.docker.internal`、`host.containers.internal`、`otel` 这类容器本地目标。
 
 示例：
 
@@ -516,6 +516,7 @@ Telegram forum topics：
         "main": {
           "bot_token": "123456:ABCDEF",
           "allow_from": ["YOUR_TELEGRAM_USER_ID"],
+          "draft_previews": false,
           "binding_commands_enabled": true,
           "topic_commands_enabled": true,
           "topic_map_command_enabled": true,
@@ -543,6 +544,12 @@ Telegram forum topics：
 - `nullclaw` 会为该 topic 和 Telegram account 写入一条新的精确 `bindings[]` 条目到 `~/.nullclaw/config.json`。
 - 该 topic 中的下一条消息将使用新路由的 agent 配置。
 - `nullclaw` 必须对 `~/.nullclaw/config.json` 有写权限，`/bind` 才能持久化变更。
+
+关于 `draft_previews`：
+
+- 默认值也是推荐值是 `false`。
+- 关闭后，Telegram 仍会在回复生成期间显示活动状态/typing，但不会使用临时的 `sendMessageDraft` 预览。
+- 只有在你明确想要实时部分预览，并且能接受 Telegram 在最终消息到达前隐藏、替换这些 draft 时，才建议设置 `draft_previews=true`。
 
 关于 `account_id`：
 
