@@ -15,6 +15,7 @@ const gateway = @import("gateway.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 const buildConversationContext = @import("agent/prompt.zig").buildConversationContext;
 const streaming = @import("streaming.zig");
+const agent_mod = @import("agent/root.zig");
 
 const log = std.log.scoped(.a2a);
 
@@ -541,6 +542,55 @@ pub const SseStreamCtx = struct {
     }
 };
 
+/// Context for forwarding agent progress hints as intermediate SSE status-update events.
+pub const A2aProgressCtx = struct {
+    sse_ctx: *SseStreamCtx,
+
+    fn progressCallback(ctx: *anyopaque, hint: agent_mod.ProgressHint) void {
+        const self: *A2aProgressCtx = @ptrCast(@alignCast(ctx));
+        const data = buildProgressHintEvent(
+            self.sse_ctx.allocator,
+            self.sse_ctx.request_id,
+            self.sse_ctx.task_id,
+            self.sse_ctx.context_id,
+            hint.text,
+        ) catch return;
+        defer self.sse_ctx.allocator.free(data);
+        self.sse_ctx.writeSseEvent(data);
+    }
+
+    pub fn makeSink(self: *A2aProgressCtx) agent_mod.ProgressSink {
+        return .{ .callback = progressCallback, .ctx = @ptrCast(self) };
+    }
+};
+
+/// Build a TaskStatusUpdateEvent with state=working and a progress message.
+fn buildProgressHintEvent(
+    allocator: std.mem.Allocator,
+    request_id: []const u8,
+    task_id: []const u8,
+    context_id: []const u8,
+    tool_name: []const u8,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var buf_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &buf_writer.writer;
+
+    try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+    try w.writeAll(request_id);
+    try w.writeAll(",\"result\":{\"kind\":\"status-update\",\"taskId\":\"");
+    try gateway.jsonEscapeInto(w, task_id);
+    try w.writeAll("\",\"contextId\":\"");
+    try gateway.jsonEscapeInto(w, context_id);
+    try w.writeAll("\",\"status\":{\"state\":\"working\",\"message\":{\"role\":\"agent\",\"parts\":[{\"kind\":\"text\",\"text\":\"Calling tool: ");
+    try gateway.jsonEscapeInto(w, tool_name);
+    try w.writeAll("\"}]}},\"final\":false}}");
+
+    buf = buf_writer.toArrayList();
+    return buf.toOwnedSlice(allocator);
+}
+
 /// Handle a streaming JSON-RPC request by writing SSE events directly to the TCP stream.
 /// This bypasses the normal request/response cycle and writes directly.
 /// The caller must NOT call writeJsonResponse after this.
@@ -615,9 +665,11 @@ pub fn handleStreamingRpc(
         .context_id = task.context_id,
     };
     const sink = sse_ctx.makeSink();
+    var progress_ctx = A2aProgressCtx{ .sse_ctx = &sse_ctx };
+    const progress_sink = progress_ctx.makeSink();
 
     const context: ConversationContext = buildConversationContext(.{ .channel = "a2a" }).?;
-    const response = session_mgr.processMessageStreaming(task.session_key, text, context, sink) catch |err| {
+    const response = session_mgr.processMessageStreaming(task.session_key, text, context, sink, progress_sink) catch |err| {
         log.err("streaming turn failed task={s} err={s}", .{ task.id, @errorName(err) });
         var failed_task = registry.finalizeTask(allocator, task.id, .failed, null) catch null;
         defer if (failed_task) |*snapshot| snapshot.deinit(allocator);
@@ -1587,7 +1639,7 @@ const MockSessionManager = struct {
         return self.allocator.dupe(u8, self.response);
     }
 
-    pub fn processMessageStreaming(self: *MockSessionManager, session_key: []const u8, content: []const u8, conversation_context: anytype, sink: ?streaming.Sink) ![]const u8 {
+    pub fn processMessageStreaming(self: *MockSessionManager, session_key: []const u8, content: []const u8, conversation_context: anytype, sink: ?streaming.Sink, _: ?agent_mod.ProgressSink) ![]const u8 {
         // Emit chunks if a sink is provided.
         if (sink) |s| {
             s.emitChunk(self.response);
@@ -2644,4 +2696,33 @@ test "handleJsonRpc returns error for CreateTaskPushNotificationConfig alias" {
 
     try testing.expect(std.mem.indexOf(u8, resp.body, "\"error\"") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "-32003") != null);
+}
+
+test "buildProgressHintEvent emits working status-update with tool name" {
+    const data = try buildProgressHintEvent(
+        testing.allocator,
+        "\"req-1\"",
+        "task-abc",
+        "ctx-xyz",
+        "shell",
+    );
+    defer testing.allocator.free(data);
+
+    try testing.expect(std.mem.indexOf(u8, data, "\"state\":\"working\"") != null);
+    try testing.expect(std.mem.indexOf(u8, data, "Calling tool: shell") != null);
+    try testing.expect(std.mem.indexOf(u8, data, "\"final\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, data, "task-abc") != null);
+}
+
+test "buildProgressHintEvent escapes special chars in tool name" {
+    const data = try buildProgressHintEvent(
+        testing.allocator,
+        "\"req-2\"",
+        "task-1",
+        "ctx-1",
+        "tool\"with\"quotes",
+    );
+    defer testing.allocator.free(data);
+
+    try testing.expect(std.mem.indexOf(u8, data, "tool\\\"with\\\"quotes") != null);
 }

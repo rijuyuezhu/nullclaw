@@ -1596,7 +1596,7 @@ pub const SessionManager = struct {
     /// Process a message within a session context.
     /// Finds or creates the session, locks it, runs agent.turn(), returns owned response.
     pub fn processMessage(self: *SessionManager, session_key: []const u8, content: []const u8, conversation_context: ?ConversationContext) ![]const u8 {
-        return self.processMessageStreaming(session_key, content, conversation_context, null);
+        return self.processMessageStreaming(session_key, content, conversation_context, null, null);
     }
 
     /// Handle a slash command against the live session without invoking the LLM turn loop.
@@ -1641,7 +1641,7 @@ pub const SessionManager = struct {
         return maybe_response;
     }
 
-    /// Process a message within a session context and optionally forward text deltas.
+    /// Process a message within a session context and optionally forward text deltas and progress hints.
     /// Deltas are only emitted when provider streaming is active.
     pub fn processMessageStreaming(
         self: *SessionManager,
@@ -1649,6 +1649,7 @@ pub const SessionManager = struct {
         content: []const u8,
         conversation_context: ?ConversationContext,
         stream_sink: ?streaming.Sink,
+        progress_sink: ?agent_mod.ProgressSink,
     ) ![]const u8 {
         const channel = if (conversation_context) |ctx| (ctx.channel orelse "unknown") else "unknown";
         const session_hash = std.hash.Wyhash.hash(0, session_key);
@@ -1717,6 +1718,20 @@ pub const SessionManager = struct {
         } else {
             session.agent.stream_callback = null;
             session.agent.stream_ctx = null;
+        }
+
+        const prev_progress_callback = session.agent.progress_callback;
+        const prev_progress_ctx = session.agent.progress_ctx;
+        defer {
+            session.agent.progress_callback = prev_progress_callback;
+            session.agent.progress_ctx = prev_progress_ctx;
+        }
+        if (progress_sink) |ps| {
+            session.agent.progress_callback = ps.callback;
+            session.agent.progress_ctx = ps.ctx;
+        } else {
+            session.agent.progress_callback = null;
+            session.agent.progress_ctx = null;
         }
 
         // Record agent start event with channel attribution
@@ -3607,6 +3622,7 @@ test "processMessageStreaming forwards provider deltas" {
             .callback = DeltaCollector.onEvent,
             .ctx = @ptrCast(&collector),
         },
+        null,
     );
     defer testing.allocator.free(resp);
 
