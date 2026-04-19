@@ -984,13 +984,16 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\PIDFILE={s}
         \\LOGFILE={s}
         \\
+        \\ENVFILE="$NULLCLAW_HOME/.env"
+        \\RESPAWN_DELAY=3
+        \\
         \\case "$1" in
         \\  start)
         \\    echo "Starting nullclaw..."
         \\    export HOME="$SERVICE_HOME"
         \\    export NULLCLAW_HOME="$NULLCLAW_HOME"
         \\{s}
-        \\    {s} --start --background --make-pidfile --pidfile "$PIDFILE"{s} --chdir "$SERVICE_HOME" --startas /bin/sh -- -c "exec \\"$DAEMON\\" gateway >> \\"$LOGFILE\\" 2>&1"
+        \\    {s} --start --background --make-pidfile --pidfile "$PIDFILE"{s} --chdir "$SERVICE_HOME" --startas /bin/sh -- -c "[ -f \\"$ENVFILE\\" ] && set -a && . \\"$ENVFILE\\" && set +a; while true; do \\"$DAEMON\\" gateway >> \\"$LOGFILE\\" 2>&1; sleep $RESPAWN_DELAY; done"
         \\    ;;
         \\  stop)
         \\    echo "Stopping nullclaw..."
@@ -1532,6 +1535,13 @@ test "buildSysvinitScript includes user and config env" {
     try std.testing.expect(std.mem.indexOf(u8, script, "--startas /bin/sh -- -c") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "$DAEMON") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "$LOGFILE") != null);
+    // Parity: EnvironmentFile sourcing (matches systemd EnvironmentFile=-.../.env)
+    try std.testing.expect(std.mem.indexOf(u8, script, "ENVFILE=\"$NULLCLAW_HOME/.env\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, ". \"$ENVFILE\"") != null);
+    // Parity: auto-restart on crash (matches systemd Restart=always + RestartSec=3)
+    try std.testing.expect(std.mem.indexOf(u8, script, "RESPAWN_DELAY=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "while true; do") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "sleep $RESPAWN_DELAY") != null);
 }
 
 test "openRcServiceState classifies common states" {
