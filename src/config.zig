@@ -84,6 +84,7 @@ pub const SchedulerConfig = config_types.SchedulerConfig;
 pub const AgentConfig = config_types.AgentConfig;
 pub const ToolFilterGroup = config_types.ToolFilterGroup;
 pub const ToolFilterGroupMode = config_types.ToolFilterGroupMode;
+pub const ToolCustomization = config_types.ToolCustomization;
 pub const ModelRouteConfig = config_types.ModelRouteConfig;
 pub const HeartbeatConfig = config_types.HeartbeatConfig;
 pub const CronConfig = config_types.CronConfig;
@@ -1373,6 +1374,8 @@ pub const Config = struct {
         try w.print("    \"web_fetch_max_chars\": {d},\n", .{self.tools.web_fetch_max_chars});
         try w.print("    \"path_env_vars\": ", .{});
         try writePrettyJsonInline(self.allocator, w, self.tools.path_env_vars, "    ");
+        try w.print(",\n    \"tool_customizations\": ", .{});
+        try writePrettyJsonInline(self.allocator, w, self.tools.tool_customizations, "    ");
         // tools.media.audio
         {
             const am = self.audio_media;
@@ -3911,6 +3914,32 @@ test "json parse tools.path_env_vars" {
     allocator.free(cfg.tools.path_env_vars);
 }
 
+test "json parse tools.tool_customizations" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const json =
+        \\{"tools": {"tool_customizations": [
+        \\  {"name": "shell", "system_prompt": "Run commands only when necessary.", "triggers": ["run", "execute"], "priority": 300, "enabled": true},
+        \\  {"name": "calculator", "triggers": ["math"], "priority": -5, "enabled": false},
+        \\  {"system_prompt": "missing name is ignored"}
+        \\]}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = arena.allocator() };
+    try cfg.parseJson(json);
+
+    try std.testing.expectEqual(@as(usize, 2), cfg.tools.tool_customizations.len);
+    try std.testing.expectEqualStrings("shell", cfg.tools.tool_customizations[0].name);
+    try std.testing.expectEqualStrings("Run commands only when necessary.", cfg.tools.tool_customizations[0].system_prompt.?);
+    try std.testing.expectEqualStrings("run", cfg.tools.tool_customizations[0].triggers[0]);
+    try std.testing.expectEqual(@as(u8, 255), cfg.tools.tool_customizations[0].priority);
+    try std.testing.expect(cfg.tools.tool_customizations[0].enabled);
+    try std.testing.expectEqualStrings("calculator", cfg.tools.tool_customizations[1].name);
+    try std.testing.expectEqual(@as(u8, 0), cfg.tools.tool_customizations[1].priority);
+    try std.testing.expect(!cfg.tools.tool_customizations[1].enabled);
+}
+
 test "save roundtrip preserves tools.path_env_vars" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3945,6 +3974,55 @@ test "save roundtrip preserves tools.path_env_vars" {
     try std.testing.expectEqual(@as(usize, 2), loaded.tools.path_env_vars.len);
     try std.testing.expectEqualStrings("LD_LIBRARY_PATH", loaded.tools.path_env_vars[0]);
     try std.testing.expectEqualStrings("PYTHONHOME", loaded.tools.path_env_vars[1]);
+}
+
+test "save roundtrip preserves tools.tool_customizations" {
+    // Regression: custom tool config parsed from JSON must survive save/load.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    const triggers: []const []const u8 = &.{ "read", "inspect" };
+    const customizations: []const ToolCustomization = &.{
+        .{
+            .name = "file_read",
+            .system_prompt = "Read files before answering.",
+            .triggers = triggers,
+            .priority = 9,
+            .enabled = true,
+        },
+    };
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.tools.tool_customizations = customizations;
+    try cfg.save();
+
+    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var loaded = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = arena.allocator(),
+    };
+    try loaded.parseJson(content);
+    try std.testing.expectEqual(@as(usize, 1), loaded.tools.tool_customizations.len);
+    try std.testing.expectEqualStrings("file_read", loaded.tools.tool_customizations[0].name);
+    try std.testing.expectEqualStrings("Read files before answering.", loaded.tools.tool_customizations[0].system_prompt.?);
+    try std.testing.expectEqualStrings("inspect", loaded.tools.tool_customizations[0].triggers[1]);
+    try std.testing.expectEqual(@as(u8, 9), loaded.tools.tool_customizations[0].priority);
 }
 
 test "json parse autonomy allow_raw_url_chars" {

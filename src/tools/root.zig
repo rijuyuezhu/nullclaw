@@ -10,6 +10,7 @@ const memory_mod = @import("../memory/root.zig");
 const Memory = memory_mod.Memory;
 const bootstrap_mod = @import("../bootstrap/root.zig");
 const mcp_mod = @import("../mcp.zig");
+const config_types = @import("../config_types.zig");
 const SandboxBackend = @import("../security/sandbox.zig").SandboxBackend;
 const createSandbox = @import("../security/sandbox.zig").createSandbox;
 const ConfigSandboxBackend = @import("../config.zig").SandboxBackend;
@@ -248,6 +249,36 @@ pub fn ToolVTable(comptime T: type) Tool.VTable {
             }
         }.f,
     };
+}
+
+fn applyToolCustomizations(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(Tool),
+    customizations: []const config_types.ToolCustomization,
+) void {
+    if (customizations.len == 0) return;
+
+    var write_idx: usize = 0;
+    for (list.items) |*t| {
+        var keep = true;
+        for (customizations) |cust| {
+            if (!std.mem.eql(u8, t.name(), cust.name)) continue;
+            if (!cust.enabled) {
+                keep = false;
+                t.deinit(allocator);
+                break;
+            }
+            if (cust.system_prompt) |prompt| {
+                t.custom_description = prompt;
+            }
+            break;
+        }
+        if (keep) {
+            list.items[write_idx] = t.*;
+            write_idx += 1;
+        }
+    }
+    list.shrinkRetainingCapacity(write_idx);
 }
 
 /// Comptime check that a type correctly implements the Tool interface.
@@ -566,28 +597,7 @@ pub fn allTools(
         }
     }
 
-    var write_idx: usize = 0;
-    for (list.items) |*t| {
-        var keep = true;
-        for (opts.tools_config.tool_customizations) |cust| {
-            if (std.mem.eql(u8, t.name(), cust.name)) {
-                if (!cust.enabled) {
-                    keep = false;
-                    t.deinit(allocator);
-                    break;
-                }
-                if (cust.system_prompt) |prompt| {
-                    t.custom_description = prompt;
-                }
-                break;
-            }
-        }
-        if (keep) {
-            list.items[write_idx] = t.*;
-            write_idx += 1;
-        }
-    }
-    list.shrinkRetainingCapacity(write_idx);
+    applyToolCustomizations(allocator, &list, opts.tools_config.tool_customizations);
 
     return list.toOwnedSlice(allocator);
 }
@@ -755,6 +765,8 @@ pub fn subagentTools(
         };
         try list.append(allocator, ht.tool());
     }
+
+    applyToolCustomizations(allocator, &list, opts.tools_config.tool_customizations);
 
     return list.toOwnedSlice(allocator);
 }
@@ -928,6 +940,51 @@ test "all tools excludes extras when disabled" {
     //        memory_store, memory_recall, memory_list, memory_forget,
     //        delegate, schedule, spawn = 18
     try std.testing.expectEqual(@as(usize, 18), tools.len);
+}
+
+test "all tools applies customization overrides" {
+    const customizations: []const config_types.ToolCustomization = &.{
+        .{ .name = "shell", .system_prompt = "Use shell only for deterministic local commands." },
+        .{ .name = "calculator", .enabled = false },
+    };
+
+    const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{
+        .tools_config = .{ .tool_customizations = customizations },
+    });
+    defer deinitTools(std.testing.allocator, tools);
+
+    var saw_shell = false;
+    for (tools) |t| {
+        try std.testing.expect(!std.mem.eql(u8, t.name(), "calculator"));
+        if (std.mem.eql(u8, t.name(), "shell")) {
+            try std.testing.expectEqualStrings("Use shell only for deterministic local commands.", t.description());
+            saw_shell = true;
+        }
+    }
+    try std.testing.expect(saw_shell);
+}
+
+test "subagent tools applies customization overrides" {
+    // Regression: delegated agent tools must honor the same overrides as top-level tools.
+    const customizations: []const config_types.ToolCustomization = &.{
+        .{ .name = "file_read", .system_prompt = "Read only the files needed for the delegated task." },
+        .{ .name = "git", .enabled = false },
+    };
+
+    const tools = try subagentTools(std.testing.allocator, "/tmp/yc_test", .{
+        .tools_config = .{ .tool_customizations = customizations },
+    });
+    defer deinitTools(std.testing.allocator, tools);
+
+    var saw_file_read = false;
+    for (tools) |t| {
+        try std.testing.expect(!std.mem.eql(u8, t.name(), "git"));
+        if (std.mem.eql(u8, t.name(), "file_read")) {
+            try std.testing.expectEqualStrings("Read only the files needed for the delegated task.", t.description());
+            saw_file_read = true;
+        }
+    }
+    try std.testing.expect(saw_file_read);
 }
 
 test "all tools wires shell sandbox by default" {

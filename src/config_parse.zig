@@ -27,19 +27,23 @@ pub fn parseStringArray(allocator: std.mem.Allocator, arr: std.json.Array) ![]co
     return try list.toOwnedSlice(allocator);
 }
 
+fn freeToolCustomization(allocator: std.mem.Allocator, item: types.ToolCustomization) void {
+    allocator.free(item.name);
+    if (item.system_prompt) |p| allocator.free(p);
+    for (item.triggers) |t| allocator.free(t);
+    allocator.free(item.triggers);
+}
+
 fn parseToolCustomizationArray(allocator: std.mem.Allocator, arr: std.json.Array) ![]const types.ToolCustomization {
     var list: std.ArrayListUnmanaged(types.ToolCustomization) = .empty;
     errdefer {
         for (list.items) |item| {
-            allocator.free(item.name);
-            if (item.system_prompt) |p| allocator.free(p);
-            for (item.triggers) |t| allocator.free(t);
-            allocator.free(item.triggers);
+            freeToolCustomization(allocator, item);
         }
         list.deinit(allocator);
     }
 
-    try list.ensureTotalCapacity(allocator, @intCast(arr.items.len));
+    try list.ensureTotalCapacity(allocator, arr.items.len);
     for (arr.items) |item| {
         if (item != .object) continue;
         const name_val = item.object.get("name") orelse continue;
@@ -48,6 +52,8 @@ fn parseToolCustomizationArray(allocator: std.mem.Allocator, arr: std.json.Array
         var cust = types.ToolCustomization{
             .name = try allocator.dupe(u8, name_val.string),
         };
+        var appended = false;
+        errdefer if (!appended) freeToolCustomization(allocator, cust);
 
         if (item.object.get("system_prompt")) |v| {
             if (v == .string) cust.system_prompt = try allocator.dupe(u8, v.string);
@@ -56,13 +62,22 @@ fn parseToolCustomizationArray(allocator: std.mem.Allocator, arr: std.json.Array
             if (v == .array) cust.triggers = try parseStringArray(allocator, v.array);
         }
         if (item.object.get("priority")) |v| {
-            if (v == .integer) cust.priority = @intCast(std.math.clamp(v.integer, 0, 255));
+            if (v == .integer) {
+                if (v.integer <= 0) {
+                    cust.priority = 0;
+                } else if (v.integer >= 255) {
+                    cust.priority = 255;
+                } else {
+                    cust.priority = @intCast(v.integer);
+                }
+            }
         }
         if (item.object.get("enabled")) |v| {
             if (v == .bool) cust.enabled = v.bool;
         }
 
         try list.append(allocator, cust);
+        appended = true;
     }
     return try list.toOwnedSlice(allocator);
 }
@@ -1467,15 +1482,6 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (tl.object.get("tool_customizations")) |v| {
                 if (v == .array) self.tools.tool_customizations = try parseToolCustomizationArray(self.allocator, v.array);
-            }
-            if (tl.object.get("tool_customizations_file")) |v| {
-                if (v == .string) self.tools.tool_customizations_file = try self.allocator.dupe(u8, v.string);
-            }
-            if (tl.object.get("trigger_modifiers")) |v| {
-                if (v == .array) self.tools.trigger_modifiers = try parseStringArray(self.allocator, v.array);
-            }
-            if (tl.object.get("trigger_punctuation")) |v| {
-                if (v == .string) self.tools.trigger_punctuation = try self.allocator.dupe(u8, v.string);
             }
             // tools.media.audio → self.audio_media
             if (tl.object.get("media")) |media| {
