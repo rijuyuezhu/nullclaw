@@ -25,11 +25,16 @@
 
 const std = @import("std");
 const std_compat = @import("compat");
+const build_options = @import("build_options");
 const root = @import("../root.zig");
+const url_percent = @import("../../url_percent.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
 const MemoryEntry = root.MemoryEntry;
 const log = std.log.scoped(.memory_kg);
+const sqlite_mod = if (build_options.enable_sqlite) @import("sqlite.zig") else @import("sqlite_disabled.zig");
+const c = sqlite_mod.c;
+const SQLITE_STATIC = sqlite_mod.SQLITE_STATIC;
 
 const ENTITY_STORE_PREFIX = "__kg:entity:";
 const RELATION_STORE_PREFIX = "__kg:rel:";
@@ -37,7 +42,6 @@ const TRAVERSE_QUERY_PREFIX = "kg:traverse:";
 const PATH_QUERY_PREFIX = "kg:path:";
 const RELATIONS_QUERY_PREFIX = "kg:relations:";
 const RELATION_CATEGORY = "__kg:relation";
-const DEFAULT_QUERY_LIMIT: usize = 100;
 
 const ParsedRelationKey = struct {
     id: []const u8,
@@ -52,11 +56,6 @@ const ParsedRelationKey = struct {
     }
 };
 
-pub const c = @cImport({
-    @cInclude("sqlite3.h");
-});
-
-pub const SQLITE_STATIC: c.sqlite3_destructor_type = null;
 const BUSY_TIMEOUT_MS: c_int = 5000;
 
 pub const KgMemory = struct {
@@ -67,6 +66,8 @@ pub const KgMemory = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, db_path: [*:0]const u8) !Self {
+        const use_wal = sqlite_mod.shouldUseWal(db_path);
+
         var db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(db_path, &db);
         if (rc != c.SQLITE_OK) {
@@ -81,7 +82,7 @@ pub const KgMemory = struct {
         }
 
         var self_ = Self{ .db = db, .allocator = allocator };
-        try self_.configurePragmas();
+        self_.configurePragmas(use_wal);
         try self_.migrate();
         return self_;
     }
@@ -93,9 +94,13 @@ pub const KgMemory = struct {
         }
     }
 
-    fn configurePragmas(self: *Self) !void {
+    fn configurePragmas(self: *Self, use_wal: bool) void {
+        const journal_pragma: [:0]const u8 = if (use_wal)
+            "PRAGMA journal_mode = WAL;"
+        else
+            "PRAGMA journal_mode = DELETE;";
         const pragmas = [_][:0]const u8{
-            "PRAGMA journal_mode = DELETE;",
+            journal_pragma,
             "PRAGMA synchronous  = NORMAL;",
             "PRAGMA temp_store   = MEMORY;",
             "PRAGMA cache_size   = -2000;",
@@ -149,10 +154,6 @@ pub const KgMemory = struct {
         return std.fmt.allocPrint(allocator, "{d}", .{ts});
     }
 
-    fn effectiveLimit(limit: usize) usize {
-        return if (limit > 0) limit else DEFAULT_QUERY_LIMIT;
-    }
-
     fn execSql(self: *Self, sql: [:0]const u8) !void {
         var err_msg: [*c]u8 = null;
         defer if (err_msg) |msg| c.sqlite3_free(msg);
@@ -183,32 +184,6 @@ pub const KgMemory = struct {
         self.rollbackTransaction() catch |err| {
             log.warn("kg rollback failed: {}", .{err});
         };
-    }
-
-    fn isUnreservedByte(byte: u8) bool {
-        return std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '.' or byte == '_' or byte == '~';
-    }
-
-    fn appendPercentEncodedByte(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, byte: u8) !void {
-        const hex = "0123456789ABCDEF";
-        try out.append(allocator, '%');
-        try out.append(allocator, hex[byte >> 4]);
-        try out.append(allocator, hex[byte & 0x0F]);
-    }
-
-    fn percentEncode(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(allocator);
-
-        for (raw) |byte| {
-            if (isUnreservedByte(byte)) {
-                try out.append(allocator, byte);
-            } else {
-                try appendPercentEncodedByte(&out, allocator, byte);
-            }
-        }
-
-        return out.toOwnedSlice(allocator);
     }
 
     fn decodeHexNibble(byte: u8) !u8 {
@@ -243,11 +218,11 @@ pub const KgMemory = struct {
     }
 
     pub fn relationStoreKey(allocator: std.mem.Allocator, subject_id: []const u8, predicate: []const u8, object_id: []const u8) ![]u8 {
-        const subject_id_enc = try percentEncode(allocator, subject_id);
+        const subject_id_enc = try url_percent.encode(allocator, subject_id);
         defer allocator.free(subject_id_enc);
-        const predicate_enc = try percentEncode(allocator, predicate);
+        const predicate_enc = try url_percent.encode(allocator, predicate);
         defer allocator.free(predicate_enc);
-        const object_id_enc = try percentEncode(allocator, object_id);
+        const object_id_enc = try url_percent.encode(allocator, object_id);
         defer allocator.free(object_id_enc);
 
         return std.fmt.allocPrint(allocator, RELATION_STORE_PREFIX ++ "{s}:{s}:{s}", .{
@@ -258,16 +233,16 @@ pub const KgMemory = struct {
     }
 
     pub fn traverseQuery(allocator: std.mem.Allocator, entity_id: []const u8, max_depth: usize) ![]u8 {
-        const entity_id_enc = try percentEncode(allocator, entity_id);
+        const entity_id_enc = try url_percent.encode(allocator, entity_id);
         defer allocator.free(entity_id_enc);
 
         return std.fmt.allocPrint(allocator, TRAVERSE_QUERY_PREFIX ++ "{s}:{d}", .{ entity_id_enc, max_depth });
     }
 
     pub fn pathQuery(allocator: std.mem.Allocator, from_id: []const u8, to_id: []const u8, max_depth: usize) ![]u8 {
-        const from_id_enc = try percentEncode(allocator, from_id);
+        const from_id_enc = try url_percent.encode(allocator, from_id);
         defer allocator.free(from_id_enc);
-        const to_id_enc = try percentEncode(allocator, to_id);
+        const to_id_enc = try url_percent.encode(allocator, to_id);
         defer allocator.free(to_id_enc);
 
         return std.fmt.allocPrint(allocator, PATH_QUERY_PREFIX ++ "{s}:{s}:{d}", .{
@@ -278,7 +253,7 @@ pub const KgMemory = struct {
     }
 
     pub fn relationsQuery(allocator: std.mem.Allocator, entity_id: []const u8) ![]u8 {
-        const entity_id_enc = try percentEncode(allocator, entity_id);
+        const entity_id_enc = try url_percent.encode(allocator, entity_id);
         defer allocator.free(entity_id_enc);
 
         return std.fmt.allocPrint(allocator, RELATIONS_QUERY_PREFIX ++ "{s}", .{entity_id_enc});
@@ -477,7 +452,7 @@ pub const KgMemory = struct {
 
         _ = c.sqlite3_bind_text(stmt, 1, start_id.ptr, @intCast(start_id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_int64(stmt, 2, @intCast(max_depth));
-        _ = c.sqlite3_bind_int64(stmt, 3, @intCast(effectiveLimit(limit)));
+        _ = c.sqlite3_bind_int64(stmt, 3, @intCast(limit));
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const entry = try self.readEntityFromRow(stmt.?, allocator);
@@ -538,7 +513,7 @@ pub const KgMemory = struct {
         _ = c.sqlite3_bind_text(stmt, 1, from_id.ptr, @intCast(from_id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 2, to_id.ptr, @intCast(to_id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_int64(stmt, 3, @intCast(max_depth));
-        _ = c.sqlite3_bind_int64(stmt, 4, @intCast(effectiveLimit(limit)));
+        _ = c.sqlite3_bind_int64(stmt, 4, @intCast(limit));
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const entry = try self.readEntityFromRow(stmt.?, allocator);
@@ -569,7 +544,7 @@ pub const KgMemory = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         _ = c.sqlite3_bind_text(stmt, 1, entity_id.ptr, @intCast(entity_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(effectiveLimit(limit)));
+        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(limit));
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             try entries.append(allocator, try self.readRelationFromRow(stmt.?, allocator));
@@ -595,22 +570,6 @@ pub const KgMemory = struct {
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             try entries.append(allocator, try self.readEntityFromRow(stmt.?, allocator));
-        }
-    }
-
-    fn appendRelationList(self: *Self, entries: *std.ArrayListUnmanaged(MemoryEntry), allocator: std.mem.Allocator) !void {
-        const sql =
-            \\SELECT id, subject_id, predicate, object_id, created_at
-            \\FROM kg_relations
-            \\ORDER BY created_at DESC, id DESC
-        ;
-
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
-        defer _ = c.sqlite3_finalize(stmt);
-
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try entries.append(allocator, try self.readRelationFromRow(stmt.?, allocator));
         }
     }
 
@@ -695,7 +654,7 @@ pub const KgMemory = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         _ = c.sqlite3_bind_text(stmt, 1, fts_query.ptr, @intCast(fts_query.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(effectiveLimit(limit)));
+        _ = c.sqlite3_bind_int64(stmt, 2, @intCast(limit));
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const entry = try self.readEntityFromRow(stmt.?, allocator);
@@ -1221,6 +1180,29 @@ test "kg relations recall respects requested limit" {
     const results = try m.recall(std.testing.allocator, "kg:relations:hub", 1, null);
     defer root.freeEntries(std.testing.allocator, results);
     try std.testing.expectEqual(@as(usize, 1), results.len);
+}
+
+test "kg recall treats zero limit as zero results" {
+    var kg = try KgMemory.init(std.testing.allocator, ":memory:");
+    defer kg.deinit();
+    const m = kg.memory();
+
+    // Regression: Memory.recall limit is a hard maximum; zero must not expand to an internal default.
+    try m.store("__kg:entity:a", "Alice searchable", .core, null);
+    try m.store("__kg:entity:b", "Bob searchable", .core, null);
+    try m.store("__kg:rel:a:links:b", "", .core, null);
+
+    const fts_results = try m.recall(std.testing.allocator, "searchable", 0, null);
+    defer root.freeEntries(std.testing.allocator, fts_results);
+    try std.testing.expectEqual(@as(usize, 0), fts_results.len);
+
+    const relation_results = try m.recall(std.testing.allocator, "kg:relations:a", 0, null);
+    defer root.freeEntries(std.testing.allocator, relation_results);
+    try std.testing.expectEqual(@as(usize, 0), relation_results.len);
+
+    const traverse_results = try m.recall(std.testing.allocator, "kg:traverse:a:2", 0, null);
+    defer root.freeEntries(std.testing.allocator, traverse_results);
+    try std.testing.expectEqual(@as(usize, 0), traverse_results.len);
 }
 
 test "kg traverse deduplicates cyclic paths" {
