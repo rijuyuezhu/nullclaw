@@ -380,6 +380,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const is_wasi = target.result.os.tag == .wasi;
     const is_static = b.option(bool, "static", "Static build") orelse false;
+    const use_llvm: ?bool = if (b.option(bool, "llvm", "Force LLVM codegen backend") orelse false) true else null;
+    const use_lld: ?bool = if (b.option(bool, "lld", "Force LLD linker") orelse false) true else null;
     const enable_embedded_wasm3 = b.option(bool, "embedded_wasm3", "Embed wasm3 runtime into nullclaw binary (default: true; use -Dembedded_wasm3=false to disable)") orelse true;
     const enable_readline = b.option(bool, "readline", "Enable GNU readline for interactive CLI editing (default: false; Unix-like only, requires system libreadline)") orelse false;
     const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "dev";
@@ -577,6 +579,8 @@ pub fn build(b: *std.Build) void {
             .name = "nullclaw",
             .root_module = exe_root_module,
         });
+    exe.use_llvm = use_llvm;
+    exe.use_lld = use_lld;
     exe.root_module.addImport("build_options", build_options_module);
 
     // Link SQLite on the compile step (not the module)
@@ -624,10 +628,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     if (!is_wasi) {
         const compat_tests = b.addTest(.{ .root_module = compat_module });
+        compat_tests.use_llvm = use_llvm;
+        compat_tests.use_lld = use_lld;
         compat_tests.root_module.link_libc = true;
         test_step.dependOn(&b.addRunArtifact(compat_tests).step);
 
         const lib_tests = b.addTest(.{ .root_module = lib_mod.? });
+        lib_tests.use_llvm = use_llvm;
+        lib_tests.use_lld = use_lld;
         if (sqlite3) |lib| {
             lib_tests.root_module.linkLibrary(lib);
         }
@@ -636,6 +644,8 @@ pub fn build(b: *std.Build) void {
         }
 
         const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+        exe_tests.use_llvm = use_llvm;
+        exe_tests.use_lld = use_lld;
         if (enable_readline) {
             lib_tests.root_module.linkSystemLibrary("readline", .{});
             exe_tests.root_module.linkSystemLibrary("readline", .{});
